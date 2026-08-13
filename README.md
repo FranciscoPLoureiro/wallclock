@@ -49,7 +49,7 @@ of them produce.
 |---|---|---|
 | 0 | Environment, repository, CI that loads BPF into a real kernel | ✅ done |
 | 1 | First program end to end: map aggregation and a ring buffer path | ✅ done |
-| 2 | Off-CPU, runqueue delay, and cgroup throttling separated | planned |
+| 2 | Off-CPU, runqueue delay, and cgroup throttling separated | 🔨 on-CPU, runqueue and blocked done; throttling next |
 | 3 | What the Go runtime makes invisible from the kernel's side | planned |
 | 4 | Network time attributed to individual destinations | planned |
 | 5 | Validation against injected latency, and measured overhead | planned |
@@ -62,6 +62,32 @@ Grafana started sharing the machine, and cannot say where the difference went.
 That is a correlation. This is the tool that turns it into an explanation.
 
 ## What works now
+
+Wall clock split into where it actually went. Forty-eight spinning threads on
+sixteen CPUs, so each one can have a third of a CPU and no more:
+
+```
+$ sudo wallclock profile -for 8s -comm wc-load -top 5
+watching every thread for 8s
+
+     tid  observed       on-cpu     runqueue  blocked  unknown  command
+  100047     8.05s  31.1% 2.51s  68.9% 5.54s  0.0% 0s  0.0% 0s  wc-load
+  100122     8.05s  31.6% 2.54s   68.4% 5.5s  0.0% 0s  0.0% 0s  wc-load
+  100076     8.04s  31.7% 2.54s  68.3% 5.49s  0.0% 0s  0.0% 0s  wc-load
+  100129     8.05s  31.8% 2.56s  68.2% 5.49s  0.0% 0s  0.0% 0s  wc-load
+  100134     8.02s  31.6% 2.53s  68.4% 5.49s  0.0% 0s  0.0% 0s  wc-load
+
+48 threads observed (5 shown)
+every decomposition sums to 100% of the time observed
+no threads lost
+```
+
+**16 CPUs ÷ 48 runnable threads = 33.3% of a CPU each.** Measured: 31.6%.
+The remaining 1.7 points are the rest of the machine — the profiler included —
+competing for the same cores. These threads never sleep, so their blocked
+column is zero and every one of them spends two thirds of its life *ready and
+waiting for a CPU*, which is the quantity a CPU profiler cannot see and an
+off-CPU profiler reports as indistinguishable from waiting on a socket.
 
 Syscall entries per process, counted inside the kernel, filtered inside the
 kernel, with what was thrown away reported rather than assumed:
@@ -205,6 +231,62 @@ nothing.
 
 The format is deliberate: context, the options actually considered, the
 decision, and what it costs.
+
+### Blocked time and runqueue delay are different numbers
+
+**Context.** A thread that is not running is doing one of two things: waiting
+for something to happen, or waiting for a CPU after it already happened.
+`offcputime` reports both as one quantity, because from off the CPU they look
+identical.
+
+**Decision.** Measure them separately, from three scheduler tracepoints:
+
+```
+blocked         sched_switch(leaving, not runnable)  ..  sched_wakeup
+runqueue delay  sched_wakeup                         ..  sched_switch(arriving)
+```
+
+A thread leaving the CPU **while still runnable** was preempted and goes
+straight back to the runqueue, so there is no wakeup to wait for and the
+runqueue clock starts at the switch. The tracepoint reports that case as
+`TASK_RUNNING`, or as `TASK_REPORT_MAX` when the switch was a preemption —
+and missing the second is the most expensive mistake available here.
+Preemption is the *common* case on a busy machine, so filing it as blocked
+would move the bulk of runqueue delay into the blocked column and invert
+every conclusion the tool exists to reach.
+
+The two have opposite remedies. Blocked time says make the thing being waited
+on faster. Runqueue delay says the machine does not have enough CPU — or, once
+phase 2 finishes, that the cgroup was not allowed to use what there was, which
+is a third answer again and the one no existing tool separates.
+
+**Consequences.** The decomposition is per thread and it closes: on-CPU,
+runqueue, blocked and unknown sum to the time each thread was observed, and
+the tool prints whether they did rather than asserting it. Two things that are
+deliberately visible in that sentence:
+
+- **Observed, not the session window.** A thread first seen halfway through
+  has half a window nobody watched. Reporting percentages of the session would
+  silently attribute time that was never measured, so each thread reports the
+  span it was actually watched for.
+- **The residual is printed, and it found a real bug.** Across the whole
+  machine it now reads `every decomposition sums to 100% of the time
+  observed` — exactly zero, five runs out of five. It did not start that way.
+  The first machine-wide run reported a decomposition off by 16 ms, then 60,
+  then 132, while every synthetic thread closed perfectly.
+
+  The cause was **thread 0**. Every CPU has its own idle task and all of them
+  report pid 0, so one map entry was being written by sixteen cores at once;
+  the accumulators are plain additions, correct for a thread that runs on one
+  CPU at a time and not for sixteen concurrent writers. Skipping the idle task
+  loses nothing — idle time belongs to a CPU, not to a thread — and the
+  residual went to zero.
+
+  A tool without that check would have printed the same plausible table and
+  been quietly wrong. The residual is not decoration; it is the only thing
+  that would have noticed. It is still printed when it is small, with a
+  declared 1 ms tolerance for the cost of reading a map the kernel is writing
+  to, and anything past that is called what it is.
 
 ### Aggregate in the kernel, stream only when you must
 
