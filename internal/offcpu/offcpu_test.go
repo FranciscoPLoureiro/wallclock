@@ -161,10 +161,22 @@ func TestASpinningThreadIsOnCPU(t *testing.T) {
 	// which is a real measurement, not noise, and lumping it into on-CPU
 	// would hide exactly the quantity this project is about. What the test
 	// asserts is that it was runnable throughout rather than blocked.
+	//
+	// A share of what was observed, not of how long it spun. A thread that is
+	// never preempted generates no scheduler events at all, so the tool first
+	// sees it at its first context switch and honestly reports a shorter
+	// observation than the spin -- on a quiet four-CPU runner that was 310 ms
+	// of a 600 ms spin. Asserting against the spin would be asserting that the
+	// machine was busy enough to preempt it, which is a fact about the machine
+	// and not about the measurement.
 	runnable := spinner.OnCPU + spinner.Runqueue
-	if runnable < spin-50*time.Millisecond {
-		t.Errorf("runnable for %v (on-cpu %v + runqueue %v), want at least %v",
-			runnable, spinner.OnCPU, spinner.Runqueue, spin-50*time.Millisecond)
+	if spinner.Observed <= 0 {
+		t.Fatalf("the spinner was never observed at all")
+	}
+	if share := float64(runnable) / float64(spinner.Observed); share < 0.95 {
+		t.Errorf("runnable was %.1f%% of the observation (on-cpu %v + runqueue %v of %v), "+
+			"want a spinning thread to be runnable throughout",
+			100*share, spinner.OnCPU, spinner.Runqueue, spinner.Observed)
 	}
 	if share := float64(spinner.Blocked) / float64(spinner.Observed); share > 0.10 {
 		t.Errorf("blocked was %.1f%% of the observation, want a spinning thread near zero",
