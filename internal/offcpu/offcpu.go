@@ -22,6 +22,8 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 	"golang.org/x/sys/unix"
+
+	"github.com/FranciscoPLoureiro/wallclock/internal/pidns"
 )
 
 //go:generate go tool bpf2go -target bpfel -type thread -type stat_slot offcpu ../../bpf/offcpu.bpf.c -- -D__TARGET_ARCH_x86 -I/usr/include/x86_64-linux-gnu
@@ -35,14 +37,21 @@ const (
 	StateOnCPU    State = 1
 	StateRunqueue State = 2
 	StateBlocked  State = 3
+	StateExited   State = 4
 )
 
 // Thread is one thread's decomposition over the time it was observed.
 type Thread struct {
 	// TID is the thread id **as the initial pid namespace numbers it**,
-	// which inside a container is not the number /proc shows. See
-	// syscount.InInitialPIDNamespace.
+	// which inside a container is not the number /proc shows. See the pidns
+	// package.
 	TID uint32
+	// Exited reports that the thread was gone by the time this was read, so
+	// its numbers are final and its observation window closed when it died
+	// rather than when the report was produced. Short-lived work is real
+	// work and it is reported; what it must not do is go on accruing
+	// blocked time after the thread that earned it has stopped existing.
+	Exited bool
 	// Comm is the thread's name, taken from the tracepoint rather than from
 	// /proc, so it is right for threads that have since exited and for pids
 	// this process cannot look up.
@@ -59,8 +68,10 @@ type Thread struct {
 	Runqueue time.Duration
 	Blocked  time.Duration
 	// Unknown is time the thread spent in a state this tool could not name.
-	// It should be zero, it is displayed anyway, and the day it is not zero
-	// is the day the state machine has a hole in it.
+	// It should be zero, and it is accumulated in the kernel rather than
+	// merely displayed, so that it can actually become non-zero: a state
+	// added without a matching case would otherwise lose its time silently
+	// while this column went on reporting zero and reading like assurance.
 	Unknown time.Duration
 }
 
@@ -87,18 +98,23 @@ func (t Thread) Residual() time.Duration { return t.Observed - t.Accounted() }
 
 // Drops is what the kernel side could not record.
 type Drops struct {
-	// ThreadsFull counts threads that could not be tracked because the map
-	// was at max_entries. Their time is missing entirely rather than
-	// misfiled, so a non-zero value here means the report is incomplete and
-	// says so.
-	ThreadsFull uint64
+	// EventsDropped counts scheduler *events* discarded because the threads
+	// map was at max_entries -- not the threads behind them. When the map is
+	// full the insert fails, the entry never comes into existence, and the
+	// next event for the same thread takes the same path, so one untracked
+	// thread contributes an event per context switch. Reporting this as a
+	// count of threads printed "LOST 50000 threads entirely" on machines
+	// with a few hundred, which is the kind of number that destroys trust in
+	// the lines around it.
+	EventsDropped uint64
 	// TargetsFull counts new threads of a tracked process that could not be
-	// added to the target set, so their time was never collected.
+	// added to the target set, so their time was never collected. This one
+	// really is a thread count: there is one fork per thread.
 	TargetsFull uint64
 }
 
 // Any reports whether anything was lost.
-func (d Drops) Any() bool { return d.ThreadsFull > 0 || d.TargetsFull > 0 }
+func (d Drops) Any() bool { return d.EventsDropped > 0 || d.TargetsFull > 0 }
 
 // Session owns the loaded programs, their maps and the attachments.
 type Session struct {
@@ -174,14 +190,36 @@ func Open(targetPID int) (_ *Session, err error) {
 	// CO-RE, which is what makes it work on a kernel whose formatted layout
 	// for this tracepoint is not the one it was compiled against. See the
 	// comment on it in bpf/offcpu.bpf.c.
-	fork, err := link.AttachRawTracepoint(link.RawTracepointOptions{
-		Name:    "sched_process_fork",
-		Program: s.objs.OnSchedProcessFork,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("attach to the raw sched_process_fork tracepoint: %w", err)
+	for _, raw := range []struct {
+		name    string
+		program *ebpf.Program
+	}{
+		{"sched_process_fork", s.objs.OnSchedProcessFork},
+		{"sched_process_exit", s.objs.OnSchedProcessExit},
+	} {
+		l, err := link.AttachRawTracepoint(link.RawTracepointOptions{
+			Name:    raw.name,
+			Program: raw.program,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("attach to the raw %s tracepoint: %w", raw.name, err)
+		}
+		s.links = append(s.links, l)
 	}
-	s.links = append(s.links, fork)
+
+	// Seeded once more, now that the fork program is watching. The first
+	// pass ran before anything was attached, so a thread the target started
+	// in between appears in neither -- not in the snapshot, because it did
+	// not exist yet, and not through the fork program, because nothing was
+	// listening. Nothing re-seeds later, so that thread would stay missing
+	// for the whole session with no counter to show it: the process would
+	// simply appear to do less work than it does. A second /proc walk closes
+	// the window.
+	if targetPID > 0 {
+		if err = s.seedTargets(targetPID); err != nil {
+			return nil, err
+		}
+	}
 
 	return s, nil
 }
@@ -195,6 +233,24 @@ func Open(targetPID int) (_ *Session, err error) {
 // refused rather than left to produce an empty report that looks like an idle
 // process.
 func (s *Session) seedTargets(pid int) error {
+	// Checked, not assumed, and refused rather than warned about. Where the
+	// namespaces differ these two numberings disagree for every thread, the
+	// filter matches nothing at all, and the report that comes out is an
+	// empty one -- which reads exactly like a process that was idle. There
+	// is no partial success to salvage here, so failing is the only honest
+	// outcome.
+	initial, err := pidns.InInitial()
+	if err != nil {
+		return fmt.Errorf("determine this process's pid namespace: %w", err)
+	}
+	if !initial {
+		return fmt.Errorf(
+			"cannot filter by pid from inside a pid namespace: the kernel reports "+
+				"pids as the initial namespace numbers them, and pid %d here means "+
+				"a different thread there. Run wallclock in the initial namespace, "+
+				"or profile without -pid", pid)
+	}
+
 	taskDir := filepath.Join("/proc", strconv.Itoa(pid), "task")
 	entries, err := os.ReadDir(taskDir)
 	if err != nil {
@@ -239,6 +295,14 @@ func (s *Session) Threads() ([]Thread, error) {
 		tid uint32
 		raw offcpuThread
 	)
+	// Exited entries are read once and then removed. Draining them here is
+	// what bounds the map: without it every short-lived process on the
+	// machine occupies a slot until the session ends, and on anything with
+	// process churn the map reaches max_entries and stops tracking anybody
+	// new. Collected during the walk and deleted after it, because removing
+	// the key an iterator is standing on is not something to rely on.
+	var drain []uint32
+
 	iter := s.objs.Threads.Iterate()
 	for iter.Next(&tid, &raw) {
 		now, err := monotonicNow()
@@ -251,6 +315,20 @@ func (s *Session) Threads() ([]Thread, error) {
 			OnCPU:    time.Duration(raw.OnCpuNs),    //nolint:gosec // ns since boot, signed after 292 years
 			Runqueue: time.Duration(raw.RunqueueNs), //nolint:gosec // as above
 			Blocked:  time.Duration(raw.BlockedNs),  //nolint:gosec // as above
+			Unknown:  time.Duration(raw.UnknownNs),  //nolint:gosec // as above
+		}
+
+		if State(raw.State) == StateExited {
+			// Its clock stopped when it died. SinceNs is the moment of
+			// exit, so the observation window closed there and nothing
+			// is added for the time since.
+			t.Exited = true
+			if raw.SinceNs > raw.FirstSeenNs {
+				t.Observed = time.Duration(raw.SinceNs - raw.FirstSeenNs) //nolint:gosec // as above
+			}
+			drain = append(drain, tid)
+			out = append(out, t)
+			continue
 		}
 
 		// Close out the state the thread is in right now.
@@ -263,7 +341,7 @@ func (s *Session) Threads() ([]Thread, error) {
 				t.Runqueue += current
 			case StateBlocked:
 				t.Blocked += current
-			case StateUnknown:
+			case StateUnknown, StateExited:
 				t.Unknown += current
 			}
 		}
@@ -275,6 +353,12 @@ func (s *Session) Threads() ([]Thread, error) {
 	if err := iter.Err(); err != nil {
 		return nil, fmt.Errorf("iterate the threads map: %w", err)
 	}
+
+	for _, dead := range drain {
+		if err := s.objs.Threads.Delete(dead); err != nil {
+			return nil, fmt.Errorf("remove exited thread %d: %w", dead, err)
+		}
+	}
 	return out, nil
 }
 
@@ -285,7 +369,7 @@ func (s *Session) Drops() (Drops, error) {
 		index offcpuStatSlot
 		into  *uint64
 	}{
-		{offcpuStatSlotSTAT_THREADS_FULL, &d.ThreadsFull},
+		{offcpuStatSlotSTAT_EVENTS_DROPPED, &d.EventsDropped},
 		{offcpuStatSlotSTAT_TARGETS_FULL, &d.TargetsFull},
 	} {
 		if err := s.objs.Stats.Lookup(uint32(slot.index), slot.into); err != nil {

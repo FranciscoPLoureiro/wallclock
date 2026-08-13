@@ -16,6 +16,7 @@ import (
 
 	"github.com/cilium/ebpf/ringbuf"
 
+	"github.com/FranciscoPLoureiro/wallclock/internal/pidns"
 	"github.com/FranciscoPLoureiro/wallclock/internal/syscount"
 )
 
@@ -247,7 +248,7 @@ func sleepOrInterrupt(window time.Duration) error {
 // silently matches nothing and the output is an idle process that is not
 // idle. A warning is cheap; a wrong number that looks right is not.
 func warnAboutPIDNamespace() {
-	initial, err := syscount.InInitialPIDNamespace()
+	initial, err := pidns.InInitial()
 	if err != nil || initial {
 		return
 	}

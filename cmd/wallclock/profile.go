@@ -61,12 +61,23 @@ func runProfile(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The two empty cases are reported separately. "Nothing matched your
+	// filter" and "the tool saw nothing at all" look identical in a report
+	// and mean opposite things -- one is a typo, the other is a broken
+	// session -- and on a tool whose characteristic failure is a plausible
+	// empty page, that distinction is the whole message.
+	observed := len(threads)
+	if observed == 0 {
+		fmt.Fprintln(os.Stdout, "no threads were observed at all")
+		return reportProfileDrops(session)
+	}
 	if *comm != "" {
 		threads = filterByComm(threads, *comm)
-	}
-	if len(threads) == 0 {
-		fmt.Fprintln(os.Stdout, "no threads were observed")
-		return reportProfileDrops(session)
+		if len(threads) == 0 {
+			fmt.Fprintf(os.Stdout, "%d threads were observed, none named like %q\n",
+				observed, *comm)
+			return reportProfileDrops(session)
+		}
 	}
 
 	// Busiest first, where busy means "spent the most wall clock somewhere
@@ -83,9 +94,21 @@ func runProfile(args []string) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', tabwriter.AlignRight)
 	fmt.Fprintln(w, "tid\tobserved\ton-cpu\trunqueue\tblocked\tunknown\t  command")
+	exited := 0
 	for i, t := range threads {
+		if t.Exited {
+			exited++
+		}
 		if i >= *top {
-			break
+			continue
+		}
+		// A thread that has gone is marked rather than dropped. Its time was
+		// real and its numbers are final, and the reader needs to know the
+		// difference between a thread blocked right now and one that stopped
+		// existing three seconds ago.
+		name := t.Comm
+		if t.Exited {
+			name += " (exited)"
 		}
 		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t  %s\n",
 			t.TID,
@@ -94,7 +117,7 @@ func runProfile(args []string) error {
 			percentOf(t.Runqueue, t.Observed),
 			percentOf(t.Blocked, t.Observed),
 			percentOf(t.Unknown, t.Observed),
-			t.Comm)
+			name)
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -103,6 +126,9 @@ func runProfile(args []string) error {
 	fmt.Fprintf(os.Stdout, "\n%d threads observed", len(threads))
 	if len(threads) > *top {
 		fmt.Fprintf(os.Stdout, " (%d shown)", *top)
+	}
+	if exited > 0 {
+		fmt.Fprintf(os.Stdout, ", %d of which had exited by the end of the window", exited)
 	}
 	fmt.Fprintln(os.Stdout)
 
@@ -183,10 +209,12 @@ func reportProfileDrops(session *offcpu.Session) error {
 		fmt.Fprintln(os.Stdout, "no threads lost")
 		return nil
 	}
-	if drops.ThreadsFull > 0 {
+	if drops.EventsDropped > 0 {
 		fmt.Fprintf(os.Stdout,
-			"LOST %d threads entirely: the threads map is at max_entries, "+
-				"so this report is missing them rather than misfiling them\n", drops.ThreadsFull)
+			"LOST %d scheduler events: the threads map is at max_entries, so some "+
+				"threads are missing from this report entirely rather than misfiled. "+
+				"That is events, not threads -- one untracked thread contributes one "+
+				"per context switch\n", drops.EventsDropped)
 	}
 	if drops.TargetsFull > 0 {
 		fmt.Fprintf(os.Stdout,

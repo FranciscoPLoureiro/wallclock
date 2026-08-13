@@ -176,7 +176,7 @@ type Count struct {
 	Entries uint64
 	// Comm is the name the process had when it was first seen. It comes from
 	// the kernel rather than from /proc because the pid it belongs to is in
-	// the initial namespace; see InInitialPIDNamespace.
+	// the initial namespace; see the pidns package.
 	Comm string
 }
 

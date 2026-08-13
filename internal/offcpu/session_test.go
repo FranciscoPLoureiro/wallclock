@@ -6,6 +6,7 @@ import (
 
 	"github.com/FranciscoPLoureiro/wallclock/internal/kerneltest"
 	"github.com/FranciscoPLoureiro/wallclock/internal/offcpu"
+	"github.com/FranciscoPLoureiro/wallclock/internal/pidns"
 )
 
 // Sessions have to be repeatable, and this is the test that says so.
@@ -40,6 +41,12 @@ func TestSessionsCanBeOpenedRepeatedly(t *testing.T) {
 // pointed the tool at a pid.
 func TestFilteredSessionsCanBeOpenedRepeatedly(t *testing.T) {
 	kerneltest.Root(t)
+
+	if initial, err := pidns.InInitial(); err == nil && !initial {
+		t.Skip("filtering by pid is refused inside a pid namespace, because the " +
+			"pids would mean different threads on the two sides; exercised on CI, " +
+			"which runs in the initial namespace")
+	}
 
 	for i := range 4 {
 		session, err := offcpu.Open(os.Getpid())

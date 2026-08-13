@@ -33,7 +33,8 @@
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 /*
- * Enough of task_struct to read a thread id, and not one field more.
+ * Enough of task_struct to tell a thread from a process, and not one field
+ * more.
  *
  * preserve_access_index is what makes this work on a kernel it has never
  * seen: clang records "the field named pid inside task_struct" instead of a
@@ -41,18 +42,23 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
  * BTF before the verifier ever sees the program. Declaring two fields of a
  * struct that has hundreds is not a shortcut -- CO-RE matches by name, so
  * what is left out cannot be got wrong.
+ *
+ * pid is the thread and tgid is the process, which is the opposite of what
+ * userspace means by those words.
  */
 struct task_struct {
 	int pid;
+	int tgid;
 } __attribute__((preserve_access_index));
 
 /*
  * Tracepoint contexts, declared from the format files rather than from
- * vmlinux.h. A tracepoint's layout is stable ABI -- userspace reads it out of
- * the format file under /sys/kernel/tracing/events/sched, and these were
- * copied from there -- so no CO-RE relocation is needed. That stops being
- * true the moment this reads a field of task_struct, which is what the
- * throttling work will need.
+ * vmlinux.h. Reading a formatted tracepoint at constant offsets is cheaper
+ * than a CO-RE read, and for these three the layout was checked against both
+ * kernels this project runs on.
+ *
+ * That check is not a formality -- see the note on sched_process_fork below,
+ * where it was not done and cost a day.
  */
 struct sched_switch_ctx {
 	__u64 __common;
@@ -74,10 +80,10 @@ struct sched_wakeup_ctx {
 };
 
 /*
- * sched_process_fork has no context struct here on purpose, and the reason is
- * the most useful thing this file has to teach.
+ * sched_process_fork and sched_process_exit have no context struct here on
+ * purpose, and the reason is the most useful thing this file has to teach.
  *
- * It had one, copied from the format file on the development kernel:
+ * fork had one, copied from the format file on the development kernel:
  *
  *     field:char parent_comm[16];  offset:8;   size:16;      (6.6)
  *     field:pid_t parent_pid;      offset:24;  size:4;
@@ -96,12 +102,11 @@ struct sched_wakeup_ctx {
  * looking in the wrong place, and it happened only on CI, because CI runs the
  * newer kernel.
  *
- * So the comment above about tracepoint layouts being stable ABI is true of
- * the field *names* and not of their offsets. The raw tracepoint below is
- * given the task_struct pointers the kernel passes internally, and CO-RE
- * relocates the field read against whatever kernel is loading it -- which is
- * the mechanism this project is built on, arriving where it was needed rather
- * than where it was planned.
+ * So tracepoint field *names* are stable ABI and their offsets are not. The
+ * raw tracepoints below are given the task_struct pointers the kernel passes
+ * internally, and CO-RE relocates the field reads against whatever kernel is
+ * loading them. Raw tracepoints are also immune to arguments being appended,
+ * which both of these have had across versions.
  */
 
 /*
@@ -114,6 +119,10 @@ struct sched_wakeup_ctx {
  * expensive mistake available here: preemption is the common case on a busy
  * machine, and it would move the bulk of runqueue delay into the blocked
  * column and invert the conclusion.
+ *
+ * The two cannot collide. __trace_sched_switch_state returns TASK_REPORT_MAX
+ * on its own for a preemption, and otherwise 1 << (index - 1) where the
+ * largest reportable index yields 0x80.
  */
 #define TASK_RUNNING 0x0000
 #define TASK_REPORT_MAX 0x0100
@@ -123,6 +132,18 @@ enum thread_state {
 	STATE_ON_CPU = 1,
 	STATE_RUNQUEUE = 2,
 	STATE_BLOCKED = 3,
+	/*
+	 * The thread is gone and its numbers are final. Nothing accumulates
+	 * into an exited entry, and userspace drains it on the next read.
+	 *
+	 * Without this state a dead thread stays parked in whatever it was
+	 * doing last -- which at exit is a switch out in a non-runnable state,
+	 * so BLOCKED -- and its blocked time grows for as long as the session
+	 * runs. Measured: /bin/true, alive for about a millisecond, reported
+	 * as blocked for 12.02 seconds of a 12 second window, and 660 threads
+	 * "observed" on a machine with ninety.
+	 */
+	STATE_EXITED = 4,
 };
 
 struct thread {
@@ -131,11 +152,17 @@ struct thread {
 	 * halfway through has half a window of history nobody observed, and
 	 * pretending otherwise would put that time in a category. */
 	__u64 first_seen_ns;
-	/* When the current state began. */
+	/* When the current state began. For an exited thread this is when it
+	 * exited, which is what makes its observation window closed. */
 	__u64 since_ns;
 	__u64 on_cpu_ns;
 	__u64 runqueue_ns;
 	__u64 blocked_ns;
+	/* Time credited to no named state. It should always be zero, and it is
+	 * accumulated rather than merely displayed so that the day a state is
+	 * added without a case in credit_elapsed, the report says so instead of
+	 * quietly losing the time. */
+	__u64 unknown_ns;
 	__u32 state;
 	__u32 tid;
 	char comm[16];
@@ -154,9 +181,10 @@ struct {
  * Which threads to follow. Empty means all of them.
  *
  * Userspace fills this from /proc/<pid>/task when a target is named, and the
- * fork program below adds children of tracked threads so that a thread
- * created after the session started is not silently missed -- which would
- * show up as a process whose accounted time shrinks as it scales up.
+ * fork program below adds threads the target starts afterwards, so that a
+ * process which grows its pool mid-session is not measured only through the
+ * threads it began with -- an error that looks like the process doing less
+ * work as it scales up.
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -168,7 +196,15 @@ struct {
 const volatile __u8 filter_targets = 0;
 
 enum stat_slot {
-	STAT_THREADS_FULL = 0,
+	/*
+	 * Scheduler events, not threads. When the threads map is full the
+	 * insert fails, the entry never exists, and the next event for the
+	 * same thread takes the same path -- so this counts events dropped and
+	 * is much larger than the number of threads behind them. Reporting it
+	 * as a thread count printed "LOST 50000 threads entirely" on machines
+	 * with a few hundred.
+	 */
+	STAT_EVENTS_DROPPED = 0,
 	STAT_TARGETS_FULL = 1,
 	STAT__MAX = 2,
 };
@@ -185,6 +221,12 @@ struct {
 
 static __always_inline void bump(__u32 slot)
 {
+	/*
+	 * An array map lookup with an index the verifier can see is in range
+	 * cannot fail, and the verifier still refuses the program without this
+	 * check: it knows the helper returns a pointer that may be null and
+	 * will not take anyone's word that this call site is different.
+	 */
 	__u64 *counter = bpf_map_lookup_elem(&stats, &slot);
 	if (counter)
 		__sync_fetch_and_add(counter, 1);
@@ -214,14 +256,85 @@ static __always_inline int tracked(__u32 tid)
 	return bpf_map_lookup_elem(&targets, &tid) != 0;
 }
 
+static __always_inline void start_fresh(struct thread *t, __u32 tid,
+					const char *comm, enum thread_state state,
+					__u64 now)
+{
+	t->first_seen_ns = now;
+	t->since_ns = now;
+	t->on_cpu_ns = 0;
+	t->runqueue_ns = 0;
+	t->blocked_ns = 0;
+	t->unknown_ns = 0;
+	t->state = state;
+	t->tid = tid;
+	if (comm)
+		__builtin_memcpy(&t->comm, comm, sizeof(t->comm));
+}
+
+static __always_inline void credit_elapsed(struct thread *t, __u64 now)
+{
+	__u64 elapsed = now - t->since_ns;
+	switch (t->state) {
+	case STATE_ON_CPU:
+		t->on_cpu_ns += elapsed;
+		break;
+	case STATE_RUNQUEUE:
+		t->runqueue_ns += elapsed;
+		break;
+	case STATE_BLOCKED:
+		t->blocked_ns += elapsed;
+		break;
+	case STATE_EXITED:
+		/* Frozen at the moment of exit. */
+		break;
+	default:
+		t->unknown_ns += elapsed;
+		break;
+	}
+}
+
 /*
  * Move a thread into a new state, crediting the time it spent in the old one.
  *
  * This is the whole measurement. Everything else is plumbing that decides
  * which state a thread just moved into.
+ *
+ * arrival says what the event proves about the thread, and it is what keeps
+ * dead threads dead.
+ *
+ * A switch-out proves the least: it may be a thread going to sleep, or it may
+ * be the last thing a dying task ever does. Both look identical here, and the
+ * second one leaves an entry that will never wake, never be scheduled again,
+ * and accrue blocked time until the session ends -- an `echo` with zero
+ * on-CPU and 12.02 seconds blocked, in a 12 second window.
+ *
+ * Refusing to create an entry from a switch-out was tried and is worse. A
+ * thread whose first event is going to sleep is the ordinary case for
+ * anything that waits, and not recording it loses precisely the blocked time
+ * this tool exists to measure: the sleeper in the tests came back 94.6%
+ * on-CPU, which is the same error as the phantom, pointing the other way.
+ *
+ * So a switch-out creates, and the exit program below plants a headstone
+ * instead -- an entry already marked exited, which the dying task's last
+ * switch then finds and leaves alone.
+ *
+ * Reviving an exited entry is stricter, and only sched_wakeup_new does it.
+ * That event exists for exactly one thing, a task made runnable for the first
+ * time, and it is the only unambiguous announcement that the tid now belongs
+ * to somebody new.
  */
+enum arrival {
+	/* A switch-out. May update, may not create. */
+	ARRIVAL_TAIL = 0,
+	/* A switch-in or a wakeup: the thread is alive right now. */
+	ARRIVAL_LIVE = 1,
+	/* A wakeup_new: this task did not exist until now. */
+	ARRIVAL_NEW = 2,
+};
 static __always_inline void transition(__u32 tid, const char *comm,
-				       enum thread_state next_state, __u64 now)
+				       enum thread_state next_state, __u64 now,
+				       enum arrival arrival)
 {
 	struct thread *t = bpf_map_lookup_elem(&threads, &tid);
 	if (!t) {
@@ -233,16 +346,17 @@ static __always_inline void transition(__u32 tid, const char *comm,
 		 * userspace reports how long each thread was actually
 		 * observed so the reader can see it is not the full window.
 		 */
-		struct thread fresh = {
-			.first_seen_ns = now,
-			.since_ns = now,
-			.state = next_state,
-			.tid = tid,
-		};
-		if (comm)
-			__builtin_memcpy(&fresh.comm, comm, sizeof(fresh.comm));
+		struct thread fresh = {};
+		start_fresh(&fresh, tid, comm, next_state, now);
 		if (bpf_map_update_elem(&threads, &tid, &fresh, BPF_NOEXIST) < 0)
-			bump(STAT_THREADS_FULL);
+			bump(STAT_EVENTS_DROPPED);
+		return;
+	}
+
+	if (t->state == STATE_EXITED) {
+		if (arrival != ARRIVAL_NEW)
+			return;
+		start_fresh(t, tid, comm, next_state, now);
 		return;
 	}
 
@@ -265,23 +379,7 @@ static __always_inline void transition(__u32 tid, const char *comm,
 	if (comm)
 		__builtin_memcpy(&t->comm, comm, sizeof(t->comm));
 
-	__u64 elapsed = now - t->since_ns;
-	switch (t->state) {
-	case STATE_ON_CPU:
-		t->on_cpu_ns += elapsed;
-		break;
-	case STATE_RUNQUEUE:
-		t->runqueue_ns += elapsed;
-		break;
-	case STATE_BLOCKED:
-		t->blocked_ns += elapsed;
-		break;
-	default:
-		/* STATE_UNKNOWN holds no time: nothing sets it after the
-		 * entry is created. */
-		break;
-	}
-
+	credit_elapsed(t, now);
 	t->state = next_state;
 	t->since_ns = now;
 }
@@ -314,12 +412,15 @@ int on_sched_switch(struct sched_switch_ctx *ctx)
 		int runnable = ctx->prev_state == TASK_RUNNING ||
 			       (ctx->prev_state & TASK_REPORT_MAX);
 		__builtin_memcpy(comm, ctx->prev_comm, sizeof(comm));
-		transition(prev, comm, runnable ? STATE_RUNQUEUE : STATE_BLOCKED, now);
+		/* A switch-out: this is where a dying thread last switch
+		 * arrives, moments after its exit event. */
+		transition(prev, comm, runnable ? STATE_RUNQUEUE : STATE_BLOCKED,
+			   now, ARRIVAL_TAIL);
 	}
 
 	if (tracked(next)) {
 		__builtin_memcpy(comm, ctx->next_comm, sizeof(comm));
-		transition(next, comm, STATE_ON_CPU, now);
+		transition(next, comm, STATE_ON_CPU, now, ARRIVAL_LIVE);
 	}
 
 	return 0;
@@ -338,7 +439,7 @@ int on_sched_wakeup(struct sched_wakeup_ctx *ctx)
 		return 0;
 	char comm[16];
 	__builtin_memcpy(comm, ctx->comm, sizeof(comm));
-	transition(tid, comm, STATE_RUNQUEUE, bpf_ktime_get_ns());
+	transition(tid, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_LIVE);
 	return 0;
 }
 
@@ -350,17 +451,19 @@ int on_sched_wakeup_new(struct sched_wakeup_ctx *ctx)
 		return 0;
 	char comm[16];
 	__builtin_memcpy(comm, ctx->comm, sizeof(comm));
-	transition(tid, comm, STATE_RUNQUEUE, bpf_ktime_get_ns());
+	transition(tid, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_NEW);
 	return 0;
 }
 
 /*
- * Follow the children of tracked threads.
+ * Follow the threads a tracked process starts.
  *
- * Without this, a process that starts threads after the session began is
- * measured only through the threads it already had -- and the more work it
- * spreads out, the less of it the tool sees. That is the shape of error that
- * looks like an improvement.
+ * Only its threads. sched_process_fork fires for fork() as well as for a
+ * clone that shares the address space, so adding every child would follow the
+ * target into whatever processes it spawns, and then into theirs -- a filter
+ * that grows transitively through a build or a shell. A new thread shares its
+ * parent's tgid; a forked process is its own group leader, and its tgid is its
+ * own pid.
  */
 SEC("raw_tp/sched_process_fork")
 int BPF_PROG(on_sched_process_fork, struct task_struct *parent_task,
@@ -373,9 +476,63 @@ int BPF_PROG(on_sched_process_fork, struct task_struct *parent_task,
 	if (!bpf_map_lookup_elem(&targets, &parent))
 		return 0;
 
+	if (BPF_CORE_READ(child_task, tgid) != BPF_CORE_READ(parent_task, tgid))
+		return 0;
+
 	__u32 child = (__u32)BPF_CORE_READ(child_task, pid);
 	__u8 yes = 1;
 	if (bpf_map_update_elem(&targets, &child, &yes, BPF_ANY) < 0)
 		bump(STAT_TARGETS_FULL);
+	return 0;
+}
+
+/*
+ * Close a thread's books when it exits.
+ *
+ * This fires before the dying task's final context switch, which is what
+ * makes the ordering work: the entry is marked exited here, and the switch
+ * that follows finds it in that state and leaves it alone. Without this the
+ * entry stays parked in whatever it was last doing and accrues blocked time
+ * for the rest of the session -- so a process that lived a millisecond is
+ * reported, entirely plausibly, as having been blocked for the whole window.
+ */
+SEC("raw_tp/sched_process_exit")
+int BPF_PROG(on_sched_process_exit, struct task_struct *task)
+{
+	__u32 tid = (__u32)BPF_CORE_READ(task, pid);
+	if (!tracked(tid))
+		return 0;
+
+	__u64 now = bpf_ktime_get_ns();
+
+	struct thread *t = bpf_map_lookup_elem(&threads, &tid);
+	if (!t) {
+		/*
+		 * Never seen, and it is about to switch out for the last time.
+		 * A headstone goes in so that the switch finds something
+		 * already marked exited and leaves it there; without it, that
+		 * switch creates a live-looking entry for a thread that is
+		 * already gone, and nothing will ever close it. It carries no
+		 * time -- there is none to report -- and userspace drains it
+		 * on the next read.
+		 */
+		struct thread headstone = {};
+		start_fresh(&headstone, tid, NULL, STATE_EXITED, now);
+		if (bpf_map_update_elem(&threads, &tid, &headstone, BPF_NOEXIST) < 0)
+			bump(STAT_EVENTS_DROPPED);
+		return 0;
+	}
+
+	credit_elapsed(t, now);
+	t->state = STATE_EXITED;
+	t->since_ns = now;
+
+	/*
+	 * Dropped from the target set as well, so that the next thread to be
+	 * handed this tid is not followed on the strength of having inherited
+	 * a number.
+	 */
+	if (filter_targets)
+		bpf_map_delete_elem(&targets, &tid);
 	return 0;
 }

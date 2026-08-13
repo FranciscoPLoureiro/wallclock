@@ -16,9 +16,9 @@ import (
 type offcpuStatSlot uint32
 
 const (
-	offcpuStatSlotSTAT_THREADS_FULL offcpuStatSlot = 0
-	offcpuStatSlotSTAT_TARGETS_FULL offcpuStatSlot = 1
-	offcpuStatSlotSTAT__MAX         offcpuStatSlot = 2
+	offcpuStatSlotSTAT_EVENTS_DROPPED offcpuStatSlot = 0
+	offcpuStatSlotSTAT_TARGETS_FULL   offcpuStatSlot = 1
+	offcpuStatSlotSTAT__MAX           offcpuStatSlot = 2
 )
 
 type offcpuThread struct {
@@ -28,6 +28,7 @@ type offcpuThread struct {
 	OnCpuNs     uint64
 	RunqueueNs  uint64
 	BlockedNs   uint64
+	UnknownNs   uint64
 	State       uint32
 	Tid         uint32
 	Comm        [16]int8
@@ -40,6 +41,7 @@ const (
 	offcpuMapStats               = "stats"
 	offcpuMapTargets             = "targets"
 	offcpuMapThreads             = "threads"
+	offcpuProgOnSchedProcessExit = "on_sched_process_exit"
 	offcpuProgOnSchedProcessFork = "on_sched_process_fork"
 	offcpuProgOnSchedSwitch      = "on_sched_switch"
 	offcpuProgOnSchedWakeup      = "on_sched_wakeup"
@@ -91,6 +93,7 @@ type offcpuSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type offcpuProgramSpecs struct {
+	OnSchedProcessExit *ebpf.ProgramSpec `ebpf:"on_sched_process_exit"`
 	OnSchedProcessFork *ebpf.ProgramSpec `ebpf:"on_sched_process_fork"`
 	OnSchedSwitch      *ebpf.ProgramSpec `ebpf:"on_sched_switch"`
 	OnSchedWakeup      *ebpf.ProgramSpec `ebpf:"on_sched_wakeup"`
@@ -161,6 +164,7 @@ type offcpuVariables struct {
 //
 // It can be passed to loadOffcpuObjects or ebpf.CollectionSpec.LoadAndAssign.
 type offcpuPrograms struct {
+	OnSchedProcessExit *ebpf.Program `ebpf:"on_sched_process_exit"`
 	OnSchedProcessFork *ebpf.Program `ebpf:"on_sched_process_fork"`
 	OnSchedSwitch      *ebpf.Program `ebpf:"on_sched_switch"`
 	OnSchedWakeup      *ebpf.Program `ebpf:"on_sched_wakeup"`
@@ -169,6 +173,7 @@ type offcpuPrograms struct {
 
 func (p *offcpuPrograms) Close() error {
 	return _OffcpuClose(
+		p.OnSchedProcessExit,
 		p.OnSchedProcessFork,
 		p.OnSchedSwitch,
 		p.OnSchedWakeup,
