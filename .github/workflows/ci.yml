@@ -148,6 +148,21 @@ jobs:
             echo "controllers     $(cat /sys/fs/cgroup/cgroup.controllers)"
             echo "clang           $(clang --version | head -1)"
             echo '```'
+            echo
+            echo '### Scheduler tracepoint layouts'
+            echo
+            # The programs declare these context structs from the format
+            # files. The layout is stable ABI and the *size* is not promised,
+            # and the kernel refuses to attach a program whose highest context
+            # read is past the end of the tracepoint -- with EACCES, which
+            # reads as "permission denied" and looks like anything but an
+            # offset problem. Recording them makes that diagnosable.
+            echo '```'
+            for tp in sched_switch sched_wakeup sched_process_fork; do
+              echo "--- $tp"
+              sudo cat "/sys/kernel/tracing/events/sched/$tp/format" | sed -n '/^\tfield:/p'
+            done
+            echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Check the host against the requirements

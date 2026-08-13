@@ -25,6 +25,7 @@ usage:
   wallclock preflight          check that this host meets the requirements
   wallclock load <object.o>    load a compiled BPF object and report the verifier output
   wallclock syscount [flags]   count syscall entries per process (-h for flags)
+  wallclock profile [flags]    split wall clock into on-CPU, runqueue and blocked
 
 All of them exit non-zero on failure, so any can gate a build.
 `
@@ -48,6 +49,8 @@ func main() {
 			os.Exit(2)
 		}
 		err = runLoad(os.Stdout, flag.Arg(1))
+	case "profile":
+		err = runProfile(flag.Args()[1:])
 	case "syscount":
 		err = runSyscount(flag.Args()[1:])
 	default:

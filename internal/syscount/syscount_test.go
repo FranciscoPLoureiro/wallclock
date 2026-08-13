@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/FranciscoPLoureiro/wallclock/internal/kerneltest"
+	"github.com/FranciscoPLoureiro/wallclock/internal/pidns"
 	"github.com/FranciscoPLoureiro/wallclock/internal/syscount"
 )
 
@@ -247,7 +248,7 @@ func initialNamespacePID(t *testing.T) uint32 {
 			unusedSyscall, counts)
 	}
 	for pid := range counts {
-		if initial, err := syscount.InInitialPIDNamespace(); err == nil && initial {
+		if initial, err := pidns.InInitial(); err == nil && initial {
 			// Where the namespaces coincide the two numbers must agree, and
 			// checking costs nothing: if they ever disagree here, the
 			// assumption underneath this whole helper is wrong.
