@@ -89,10 +89,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang llvm libbpf-dev
 
       - name: Record what kernel this runner is
-        # Written to the job summary because the runner image changes without
-        # asking, and when a load starts failing the first question is what
-        # moved. An assertion that passed against an unrecorded kernel is not
-        # evidence of much.
+        # Recorded because the runner image changes without asking, and when a
+        # load starts failing the first question is what moved. An assertion
+        # that passed against an unrecorded kernel is not evidence of much.
+        #
+        # Piped through tee into both the job summary and the log. The summary
+        # is the readable one; the log is the one that is still there when the
+        # question is asked weeks later against a run nobody thought to look at.
         run: |
           {
             echo '### Runner kernel'
@@ -104,7 +107,7 @@ jobs:
             echo "controllers     $(cat /sys/fs/cgroup/cgroup.controllers)"
             echo "clang           $(clang --version | head -1)"
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Check the host against the requirements
         # preflight ends by loading a two-instruction program, so this step
