@@ -27,8 +27,24 @@
  */
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_tracing.h>
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
+
+/*
+ * Enough of task_struct to read a thread id, and not one field more.
+ *
+ * preserve_access_index is what makes this work on a kernel it has never
+ * seen: clang records "the field named pid inside task_struct" instead of a
+ * byte offset, and the loader resolves that against the target kernel's own
+ * BTF before the verifier ever sees the program. Declaring two fields of a
+ * struct that has hundreds is not a shortcut -- CO-RE matches by name, so
+ * what is left out cannot be got wrong.
+ */
+struct task_struct {
+	int pid;
+} __attribute__((preserve_access_index));
 
 /*
  * Tracepoint contexts, declared from the format files rather than from
@@ -57,13 +73,36 @@ struct sched_wakeup_ctx {
 	__s32 target_cpu;
 };
 
-struct sched_process_fork_ctx {
-	__u64 __common;
-	char parent_comm[16];
-	__s32 parent_pid;
-	char child_comm[16];
-	__s32 child_pid;
-};
+/*
+ * sched_process_fork has no context struct here on purpose, and the reason is
+ * the most useful thing this file has to teach.
+ *
+ * It had one, copied from the format file on the development kernel:
+ *
+ *     field:char parent_comm[16];  offset:8;   size:16;      (6.6)
+ *     field:pid_t parent_pid;      offset:24;  size:4;
+ *     field:char child_comm[16];   offset:28;  size:16;
+ *     field:pid_t child_pid;       offset:44;  size:4;
+ *
+ * On 6.17 the same tracepoint reports:
+ *
+ *     field:__data_loc char[] parent_comm;  offset:8;  size:4;
+ *
+ * The names moved to dynamic strings, every offset after them shifted, and a
+ * read of child_pid at 44 lands past the end of the record. The kernel
+ * catches that -- it refuses to attach a program whose highest context read
+ * exceeds the tracepoint's size -- and refuses with EACCES, which arrives as
+ * "permission denied" and looks like a capability problem. It cost a day of
+ * looking in the wrong place, and it happened only on CI, because CI runs the
+ * newer kernel.
+ *
+ * So the comment above about tracepoint layouts being stable ABI is true of
+ * the field *names* and not of their offsets. The raw tracepoint below is
+ * given the task_struct pointers the kernel passes internally, and CO-RE
+ * relocates the field read against whatever kernel is loading it -- which is
+ * the mechanism this project is built on, arriving where it was needed rather
+ * than where it was planned.
+ */
 
 /*
  * What the scheduler reports for a thread leaving the CPU.
@@ -323,17 +362,18 @@ int on_sched_wakeup_new(struct sched_wakeup_ctx *ctx)
  * spreads out, the less of it the tool sees. That is the shape of error that
  * looks like an improvement.
  */
-SEC("tracepoint/sched/sched_process_fork")
-int on_sched_process_fork(struct sched_process_fork_ctx *ctx)
+SEC("raw_tp/sched_process_fork")
+int BPF_PROG(on_sched_process_fork, struct task_struct *parent_task,
+	     struct task_struct *child_task)
 {
 	if (!filter_targets)
 		return 0;
 
-	__u32 parent = (__u32)ctx->parent_pid;
+	__u32 parent = (__u32)BPF_CORE_READ(parent_task, pid);
 	if (!bpf_map_lookup_elem(&targets, &parent))
 		return 0;
 
-	__u32 child = (__u32)ctx->child_pid;
+	__u32 child = (__u32)BPF_CORE_READ(child_task, pid);
 	__u8 yes = 1;
 	if (bpf_map_update_elem(&targets, &child, &yes, BPF_ANY) < 0)
 		bump(STAT_TARGETS_FULL);

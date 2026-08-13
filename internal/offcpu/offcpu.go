@@ -160,7 +160,6 @@ func Open(targetPID int) (_ *Session, err error) {
 		{"sched_switch", s.objs.OnSchedSwitch},
 		{"sched_wakeup", s.objs.OnSchedWakeup},
 		{"sched_wakeup_new", s.objs.OnSchedWakeupNew},
-		{"sched_process_fork", s.objs.OnSchedProcessFork},
 	} {
 		l, err := link.Tracepoint("sched", attachment.name, attachment.program, nil)
 		if err != nil {
@@ -168,6 +167,22 @@ func Open(targetPID int) (_ *Session, err error) {
 		}
 		s.links = append(s.links, l)
 	}
+
+	// The fork program is a raw tracepoint rather than one of the formatted
+	// ones above, so it attaches differently. It is given the task_struct
+	// pointers the kernel passes internally and reads the thread id through
+	// CO-RE, which is what makes it work on a kernel whose formatted layout
+	// for this tracepoint is not the one it was compiled against. See the
+	// comment on it in bpf/offcpu.bpf.c.
+	fork, err := link.AttachRawTracepoint(link.RawTracepointOptions{
+		Name:    "sched_process_fork",
+		Program: s.objs.OnSchedProcessFork,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("attach to the raw sched_process_fork tracepoint: %w", err)
+	}
+	s.links = append(s.links, fork)
+
 	return s, nil
 }
 
