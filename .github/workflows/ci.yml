@@ -3,8 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
+  # No branch filter. Phases are built on branches that stack on the previous
+  # one while it waits to be merged, and a pull request whose base is another
+  # branch is still a pull request that has to be green before anyone reads
+  # it. Restricting this to main meant the phase 1 branch ran no CI at all,
+  # which was only noticed because the run list came back empty.
   pull_request:
-    branches: [main]
 
 # A run whose commit has already been superseded tells nobody anything and
 # occupies a runner that the current commit needs.
