@@ -49,6 +49,7 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 struct task_struct {
 	int pid;
 	int tgid;
+	char comm[16];
 } __attribute__((preserve_access_index));
 
 /*
@@ -505,6 +506,18 @@ int BPF_PROG(on_sched_process_exit, struct task_struct *task)
 
 	__u64 now = bpf_ktime_get_ns();
 
+	/*
+	 * The name comes from the task itself rather than from whatever the
+	 * last scheduler event happened to carry. A process that forks and
+	 * execs is created under its parent's name and only acquires its own
+	 * at the exec; if it is short-lived enough that no transition arrives
+	 * in between, every record of it would be filed under the name of the
+	 * shell that started it. This is the last chance to get it right, and
+	 * the task is right here.
+	 */
+	char comm[16];
+	BPF_CORE_READ_INTO(&comm, task, comm);
+
 	struct thread *t = bpf_map_lookup_elem(&threads, &tid);
 	if (!t) {
 		/*
@@ -517,12 +530,13 @@ int BPF_PROG(on_sched_process_exit, struct task_struct *task)
 		 * on the next read.
 		 */
 		struct thread headstone = {};
-		start_fresh(&headstone, tid, NULL, STATE_EXITED, now);
+		start_fresh(&headstone, tid, comm, STATE_EXITED, now);
 		if (bpf_map_update_elem(&threads, &tid, &headstone, BPF_NOEXIST) < 0)
 			bump(STAT_EVENTS_DROPPED);
 		return 0;
 	}
 
+	__builtin_memcpy(&t->comm, comm, sizeof(t->comm));
 	credit_elapsed(t, now);
 	t->state = STATE_EXITED;
 	t->since_ns = now;

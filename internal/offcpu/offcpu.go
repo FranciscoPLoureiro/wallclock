@@ -169,6 +169,37 @@ func Open(targetPID int) (_ *Session, err error) {
 	// Attached after the targets are seeded. The other order leaves a window
 	// in which the programs run against an empty target set and file the
 	// process as untracked -- briefly, silently, and only under load.
+	//
+	// Exit goes on first, and the order is not cosmetic. Every other program
+	// can bring an entry into existence, and exit is the only one that can
+	// close it, so any gap between them is a window in which a thread can be
+	// recorded and then die unobserved -- leaving an entry that never wakes
+	// and accrues blocked time for the rest of the session. It is a window of
+	// microseconds and it landed every time, because the threads exiting just
+	// then are the ones the profiler's own startup is racing: a /bin/true and
+	// a /bin/echo, at the top of the report, blocked for the whole window.
+	//
+	// These two are raw tracepoints, given the task_struct pointers the
+	// kernel passes internally and reading through CO-RE, which is what makes
+	// them work on a kernel whose formatted layout is not the one they were
+	// compiled against. See the comment in bpf/offcpu.bpf.c.
+	for _, raw := range []struct {
+		name    string
+		program *ebpf.Program
+	}{
+		{"sched_process_exit", s.objs.OnSchedProcessExit},
+		{"sched_process_fork", s.objs.OnSchedProcessFork},
+	} {
+		l, err := link.AttachRawTracepoint(link.RawTracepointOptions{
+			Name:    raw.name,
+			Program: raw.program,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("attach to the raw %s tracepoint: %w", raw.name, err)
+		}
+		s.links = append(s.links, l)
+	}
+
 	for _, attachment := range []struct {
 		name    string
 		program *ebpf.Program
@@ -180,29 +211,6 @@ func Open(targetPID int) (_ *Session, err error) {
 		l, err := link.Tracepoint("sched", attachment.name, attachment.program, nil)
 		if err != nil {
 			return nil, fmt.Errorf("attach to sched:%s: %w", attachment.name, err)
-		}
-		s.links = append(s.links, l)
-	}
-
-	// The fork program is a raw tracepoint rather than one of the formatted
-	// ones above, so it attaches differently. It is given the task_struct
-	// pointers the kernel passes internally and reads the thread id through
-	// CO-RE, which is what makes it work on a kernel whose formatted layout
-	// for this tracepoint is not the one it was compiled against. See the
-	// comment on it in bpf/offcpu.bpf.c.
-	for _, raw := range []struct {
-		name    string
-		program *ebpf.Program
-	}{
-		{"sched_process_fork", s.objs.OnSchedProcessFork},
-		{"sched_process_exit", s.objs.OnSchedProcessExit},
-	} {
-		l, err := link.AttachRawTracepoint(link.RawTracepointOptions{
-			Name:    raw.name,
-			Program: raw.program,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("attach to the raw %s tracepoint: %w", raw.name, err)
 		}
 		s.links = append(s.links, l)
 	}
