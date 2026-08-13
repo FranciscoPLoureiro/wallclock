@@ -10,32 +10,12 @@ import (
 	"github.com/cilium/ebpf/link"
 
 	"github.com/FranciscoPLoureiro/wallclock/internal/bpfload"
+	"github.com/FranciscoPLoureiro/wallclock/internal/kerneltest"
 )
-
-// requireBPFEnv turns the skip on an unprivileged machine into a failure when
-// it is set. Loading a program needs root, so this test skips on a developer
-// laptop -- and a test that skips in CI proves exactly as much as no test at
-// all, while still colouring the run green. CI sets this, so a runner that
-// cannot load BPF fails loudly instead of quietly skipping the one check the
-// whole pipeline exists for.
-const requireBPFEnv = "WALLCLOCK_REQUIRE_BPF"
 
 // objectPathEnv lets CI point the test at an object built elsewhere in the
 // workspace rather than assuming the layout of the checkout.
 const objectPathEnv = "WALLCLOCK_BPF_OBJECT"
-
-func requireKernelAccess(t *testing.T) {
-	t.Helper()
-	if os.Geteuid() == 0 {
-		return
-	}
-	if os.Getenv(requireBPFEnv) == "1" {
-		t.Fatalf("%s=1 but euid is %d: the kernel load would have been skipped, "+
-			"which is the failure this variable exists to prevent",
-			requireBPFEnv, os.Geteuid())
-	}
-	t.Skipf("not root, so nothing can be loaded; set %s=1 to make this a failure", requireBPFEnv)
-}
 
 func objectPath(t *testing.T) string {
 	t.Helper()
@@ -49,7 +29,7 @@ func objectPath(t *testing.T) string {
 // accepted it, and the tracepoint machinery attached it. Compiling proves
 // none of those three.
 func TestObjectLoadsAndAttaches(t *testing.T) {
-	requireKernelAccess(t)
+	kerneltest.Root(t)
 
 	path := objectPath(t)
 	if _, err := os.Stat(path); err != nil {
@@ -125,7 +105,7 @@ func TestObjectRejectsSomethingThatIsNotAnELF(t *testing.T) {
 }
 
 func TestProgramLookupNamesTheMissingProgram(t *testing.T) {
-	requireKernelAccess(t)
+	kerneltest.Root(t)
 
 	path := objectPath(t)
 	if _, err := os.Stat(path); err != nil {
@@ -143,6 +123,39 @@ func TestProgramLookupNamesTheMissingProgram(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "no_such_program") {
 		t.Errorf("error %q does not name the program that was asked for", err)
 	}
+}
+
+// The verifier is the thing that will cost the most time on this project, so
+// the record of what it refuses and why is a deliverable rather than a note.
+//
+// testdata/unchecked_lookup.bpf.c is the first program it refused here: a map
+// lookup dereferenced without checking for NULL, which is ordinary C and
+// unacceptable kernel code. Keeping it as a fixture means the claim in the
+// README is re-checked on every run instead of aging quietly into fiction.
+func TestVerifierRefusesAnUncheckedMapLookup(t *testing.T) {
+	kerneltest.Root(t)
+
+	path := filepath.Join("testdata", "unchecked_lookup.bpf.o")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("%s is not there; run `make bpf` first (%v)", path, err)
+	}
+
+	loaded, err := bpfload.Object(path)
+	if err == nil {
+		loaded.Close()
+		t.Fatal("the kernel accepted a program that dereferences a map lookup " +
+			"without checking it for NULL")
+	}
+
+	// Explain is what turns this from "invalid argument" into the verifier's
+	// account of which instruction it gave up on. Asserting on the text is
+	// asserting on the reason, not merely on the failure: a program rejected
+	// for running out of instructions would otherwise pass this test.
+	explained := bpfload.Explain(err)
+	if !strings.Contains(explained, "map_value_or_null") {
+		t.Errorf("the rejection does not mention the unchecked pointer:\n%s", explained)
+	}
+	t.Logf("verifier said:\n%s", explained)
 }
 
 // Close is called from defer in every test above and from the CLI, so it has
