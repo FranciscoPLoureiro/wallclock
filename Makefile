@@ -12,6 +12,18 @@ BPF_SRC := $(wildcard bpf/*.bpf.c)
 BPF_OBJ := $(patsubst bpf/%.bpf.c,build/%.bpf.o,$(BPF_SRC))
 BIN     := bin/wallclock
 
+# Fixtures: programs written to be refused, compiled next to the test that
+# asserts the refusal. They build with the same flags as the real ones, which
+# is the point -- a fixture compiled differently would prove the difference
+# rather than the rejection.
+FIXTURE_SRC := $(wildcard internal/*/testdata/*.bpf.c)
+FIXTURE_OBJ := $(FIXTURE_SRC:.bpf.c=.bpf.o)
+
+# Test packages that need a real kernel. They are run from their own
+# directories by `make smoke`, so relative paths inside them mean the same
+# thing as they do under `go test`.
+KERNEL_TEST_DIRS := internal/bpfload internal/syscount
+
 # -target bpf makes clang emit BPF rather than host instructions.
 #
 # The include path is not decoration: linux/bpf.h pulls in linux/types.h,
@@ -61,8 +73,20 @@ build/%.bpf.o: bpf/%.bpf.c
 	$(CLANG) $(BPF_CFLAGS) -c $< -o $@
 	$(LLVM_STRIP) -g $@
 
+%.bpf.o: %.bpf.c
+	$(CLANG) $(BPF_CFLAGS) -c $< -o $@
+	$(LLVM_STRIP) -g $@
+
 .PHONY: bpf
-bpf: $(BPF_OBJ) ## Compile the BPF programs
+bpf: $(BPF_OBJ) $(FIXTURE_OBJ) ## Compile the BPF programs
+
+.PHONY: generate
+generate: ## Regenerate the bpf2go bindings and their embedded objects
+	# Separate from `bpf` because the output is committed. The generated Go
+	# and the object it embeds are what make `go build` work on a fresh clone
+	# without clang, and CI checks they are current rather than trusting that
+	# whoever changed the C remembered to run this.
+	$(GO) generate ./...
 
 .PHONY: build
 build: ## Build the wallclock binary
@@ -98,21 +122,26 @@ preflight: build ## Check this host against the requirements (needs root for the
 	$(SUDO) $(BIN) preflight
 
 .PHONY: smoke
-smoke: bpf build ## Load the compiled objects into this kernel (needs root)
+smoke: bpf build ## Run every test that needs a real kernel (needs root)
 	# Compiled first and elevated second, rather than running `sudo go test`.
 	# sudo resets PATH to secure_path, which has no /usr/local/go/bin, and it
 	# hands the build a different HOME and therefore a cold module cache. A
 	# test binary needs neither.
 	#
+	# Each binary then runs from its own package directory, because `go test`
+	# does the same and the relative paths inside the tests are written for
+	# that. Running them from the repository root instead resolves testdata
+	# and ../../build somewhere else entirely.
+	#
 	# WALLCLOCK_REQUIRE_BPF turns the unprivileged skip into a failure, so
 	# this target cannot pass by quietly doing nothing.
-	#
-	# WALLCLOCK_BPF_OBJECT because `go test` runs a test in its own package
-	# directory and a compiled test binary runs wherever it was launched, so
-	# the relative default in the test resolves to two different places.
-	$(GO) test $(GO_BUILDFLAGS) -c -o build/bpfload.test ./internal/bpfload
-	$(SUDO) env WALLCLOCK_REQUIRE_BPF=1 WALLCLOCK_BPF_OBJECT="$(CURDIR)/$(firstword $(BPF_OBJ))" \
-		./build/bpfload.test -test.v
+	@set -e; for dir in $(KERNEL_TEST_DIRS); do \
+		name=$$(basename $$dir); \
+		echo "==> $$dir"; \
+		$(GO) test $(GO_BUILDFLAGS) -c -o "$(CURDIR)/build/$$name.test" ./$$dir; \
+		( cd $$dir && $(SUDO) env WALLCLOCK_REQUIRE_BPF=1 "$(CURDIR)/build/$$name.test" -test.v ); \
+	done
+	$(SUDO) $(BIN) load $(firstword $(BPF_OBJ))
 	$(SUDO) $(BIN) load $(firstword $(BPF_OBJ))
 
 .PHONY: clean

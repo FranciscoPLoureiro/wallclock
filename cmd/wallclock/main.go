@@ -24,8 +24,9 @@ const usage = `wallclock - kernel-level latency attribution
 usage:
   wallclock preflight          check that this host meets the requirements
   wallclock load <object.o>    load a compiled BPF object and report the verifier output
+  wallclock syscount [flags]   count syscall entries per process (-h for flags)
 
-Both exit non-zero on failure, so either can gate a build.
+All of them exit non-zero on failure, so any can gate a build.
 `
 
 func main() {
@@ -47,6 +48,8 @@ func main() {
 			os.Exit(2)
 		}
 		err = runLoad(os.Stdout, flag.Arg(1))
+	case "syscount":
+		err = runSyscount(flag.Args()[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		fmt.Fprint(os.Stderr, usage)

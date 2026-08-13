@@ -116,6 +116,12 @@ measurement rather than as a principle. See the README for that decision. The
 two clang versions differ as well, which is a second thing this pair happens
 to hold constant only because it is checked.
 
+**The runner kernel moves without notice.** Two runs a few hours apart landed
+on `6.17.0-1022-azure` and `6.17.0-1020-azure`. Nothing broke, and that is the
+point of recording it in the job summary: the day something does break, the
+first question is what changed, and "the image" is only a satisfying answer
+when the previous value was written down.
+
 ## Known gaps
 
 - **Only x86-64 is exercised.** The BPF objects are compiled with

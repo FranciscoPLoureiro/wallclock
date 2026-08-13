@@ -48,7 +48,7 @@ of them produce.
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Environment, repository, CI that loads BPF into a real kernel | ✅ done |
-| 1 | First program end to end: map aggregation and a ring buffer path | planned |
+| 1 | First program end to end: map aggregation and a ring buffer path | ✅ done |
 | 2 | Off-CPU, runqueue delay, and cgroup throttling separated | planned |
 | 3 | What the Go runtime makes invisible from the kernel's side | planned |
 | 4 | Network time attributed to individual destinations | planned |
@@ -62,6 +62,43 @@ Grafana started sharing the machine, and cannot say where the difference went.
 That is a correlation. This is the tool that turns it into an explanation.
 
 ## What works now
+
+Syscall entries per process, counted inside the kernel, filtered inside the
+kernel, with what was thrown away reported rather than assumed:
+
+```
+$ sudo wallclock syscount -for 5s -top 6
+watching every process for 5s, counting in the kernel
+
+    pid  entries  command
+    479     2635  containerd
+    539     2552  dockerd
+    392     2169  initd
+    881      653  containerd-shim
+    295      648  Relay(9)
+  88969      364  systemd-udevd
+
+9776 entries across 66 processes (6 shown)
+no events lost
+```
+
+The same tracepoint, streamed event by event through a ring buffer instead:
+
+```
+$ sudo wallclock syscount -for 2s -stream -pid 539
+watching pid 539 for 2s, streaming every event
+
+     since boot  pid    tid  syscall  command
+  24714.871095s  539    541      204  dockerd
+  24714.871203s  539    541       17  dockerd
+  24714.871234s  539    541       35  dockerd
+```
+
+Counting syscalls is not interesting. Crossing the whole pipeline once with
+the simplest possible problem is: C compiled to BPF, loaded past the verifier,
+attached to a tracepoint, filtered in the kernel, and read back. Phase 2
+attaches to the scheduler, where the difficulty should be the subject rather
+than the tools.
 
 ```
 $ sudo wallclock preflight
@@ -105,10 +142,17 @@ golangci-lint. Then:
 |---|---|
 | `make verify` | Everything CI runs: clang, `go vet`, the linter, the tests |
 | `make bpf` | Compile the BPF programs |
+| `make generate` | Regenerate the bpf2go bindings and the object they embed |
 | `make build` | Build the `wallclock` binary |
 | `make preflight` | Check this host against the requirements |
-| `make smoke` | Load the compiled objects into this kernel (needs root) |
+| `make smoke` | Run every test that needs a real kernel (needs root) |
 | `make test` | Tests with the race detector |
+
+The compiled BPF object is embedded in the binary by
+[bpf2go](https://pkg.go.dev/github.com/cilium/ebpf/cmd/bpf2go), and both the
+object and the Go bindings it generates are committed. That is what makes
+`go build` work on a clone with no clang installed, and it is why CI
+regenerates them and fails if the Go side has drifted from the C.
 
 `make verify` runs as an ordinary user and the tests that need a kernel skip.
 `make smoke` is the one that refuses to skip them; see below for why that
@@ -161,6 +205,159 @@ nothing.
 
 The format is deliberate: context, the options actually considered, the
 decision, and what it costs.
+
+### Aggregate in the kernel, stream only when you must
+
+**Context.** A BPF program can keep a running total in a map that userspace
+reads when it wants a number, or it can send every event up a ring buffer and
+let userspace do the work. Phase 2 attaches to `sched_switch`, which fires
+tens of thousands of times a second on a busy machine, so this choice stops
+being stylistic.
+
+**Options.** Both, implemented, and measured rather than argued about.
+
+**Decision.** Aggregate in the kernel. Stream only where individual events
+carry something a counter cannot hold.
+
+The measurement is more lopsided than the reasoning predicted. Same machine,
+same 10 second window, same tracepoint, nothing else changed:
+
+| | delivered | lost |
+|---|---|---|
+| counting in a map | 13 455 entries, 72 processes | 0 |
+| streaming every event | 1 591 513 events | **28 653 339** |
+
+*WSL2, Debian 13, kernel 6.6.87.2-microsoft-standard-WSL2, 16 CPUs, 7.6 GB.*
+
+The ring buffer delivered five per cent of what it was given. But the more
+interesting number is the total: thirty million events in ten seconds on a
+machine that, counted in the kernel, made thirteen thousand syscalls in the
+same window. The observer produced the difference. Draining a ring buffer
+costs syscalls, those syscalls hit the same tracepoint, and each one produces
+another event to drain.
+
+Filtering the stream to a process that is not the observer settles it:
+
+```
+$ sudo wallclock syscount -for 10s -stream -pid 539
+2506 events
+no events lost
+```
+
+Two and a half thousand events, nothing lost, from the same buffer that was
+discarding ninety-five per cent a moment earlier. The flood was self-inflicted.
+
+**Consequences.** The categories in phase 2 are counters and histograms, and
+they live in kernel maps. Streaming survives for the cases where a single
+event carries irreducible detail — a stack id, a destination address — and
+those are sampled or filtered hard at the source rather than fanned out.
+
+It also sets the standard for what "measured" means here. A tool that had not
+counted its drops would have reported 1 591 513 events with total confidence
+and been wrong by a factor of twenty, and nothing in the output would have
+hinted at it. That is the failure this project exists to not have, and it took
+until the first program to meet it.
+
+### Ring buffer, not perf buffer
+
+**Context.** Getting bytes from a BPF program to userspace has two mechanisms.
+`BPF_MAP_TYPE_PERF_EVENT_ARRAY` is the older one, per-CPU; `BPF_MAP_TYPE_RINGBUF`
+arrived in 5.8 and is shared across CPUs.
+
+**Decision.** The ring buffer, which is also why the kernel floor for this
+project is 5.8.
+
+Three properties decide it. It is one buffer rather than one per CPU, so
+memory is not multiplied by core count — on the 16-CPU machine above, a perf
+buffer sized the same per CPU would reserve sixteen times the memory to hold
+the same events. Events keep their order across CPUs, and phase 2 exists to
+correlate a `sched_wakeup` on one CPU with the `sched_switch` that follows it
+on another, which an unordered per-CPU transport makes into guesswork.
+And `bpf_ringbuf_reserve` hands back the final memory *before* the event is
+written, so a full buffer is discovered before anything is copied instead of
+after — which is the difference between the drop counter above costing a
+branch and costing a wasted copy.
+
+**When the perf buffer still wins.** When the consumer is per-CPU too and
+ordering is irrelevant — a sampling profiler pinning a reader to each core
+avoids all cross-CPU contention on a single shared buffer. And on kernels
+before 5.8, where it is the only thing there is.
+
+### What the verifier actually refused
+
+**Context.** The verifier, not the compiler, is what rejects BPF programs, and
+it is the thing that will cost the most time on this project. Describing it
+abstractly is easy and worth little.
+
+**Decision.** Keep the rejections as fixtures with tests that assert them, so
+the record cannot age into fiction.
+
+The first one here was a map lookup dereferenced without a null check —
+ordinary C, and unacceptable kernel code:
+
+```c
+__u64 *count = bpf_map_lookup_elem(&counts, &tgid);
+*count += 1;                     /* no check */
+```
+
+```
+load program: permission denied:
+    R0 invalid mem access 'map_value_or_null'
+    processed 8 insns (limit 1000000)
+```
+
+`map_value_or_null` is the verifier's name for what the helper returns: either
+a pointer into the map or NULL, and the program may not touch it until the
+branch that separates those has been taken. The fix is two lines. The errno is
+a red herring — `EACCES` is what every rejected load returns, whatever the
+reason, which is why the log matters and the error code does not. The fixture
+lives in [`internal/bpfload/testdata`](internal/bpfload/testdata/unchecked_lookup.bpf.c)
+and a test asserts the kernel still refuses it.
+
+Two more the verifier insisted on, both in
+[`bpf/syscount.bpf.c`](bpf/syscount.bpf.c):
+
+- **Every lookup, even one that cannot fail.** An array map indexed by a
+  constant the verifier can prove is in range still returns a maybe-null
+  pointer, and it will not take the program's word that this call site is
+  different.
+- **Every filter is a constant, not a parameter.** The filters are
+  `const volatile` globals patched into `.rodata` before the load: `const` so
+  the verifier folds an unused filter's branch away entirely, `volatile` so
+  clang does not decide the initialiser was the final answer and delete the
+  read.
+
+The limits worth knowing before phase 2 — a 512-byte stack, loops that must be
+bounded or use `bpf_loop`, and an instruction ceiling of a million — have not
+been hit yet. The programs here are tens of instructions. That will change.
+
+### Pids from the kernel are not the pids in your /proc
+
+**Context.** `bpf_get_current_pid_tgid` returns the pid as the **initial**
+namespace numbers it, always, regardless of where the program reading it sits.
+Development here happens inside a WSL distribution, which is a pid namespace
+like any container.
+
+**Decision.** Carry the process name from the kernel in the map value, and say
+so plainly when the numbers will not match the reader's `/proc`.
+
+This surfaced as every row of the first working output showing `(exited)`: the
+tool was resolving names by reading `/proc/<pid>/comm` for pids that number
+processes in a namespace it cannot see. The pids were fine. The lookup was
+meaningless — and, worse than meaningless, since the two ranges overlap, a
+lookup that hit would have named an unrelated process with total confidence.
+
+The same trap sits under the `-pid` filter, where it is quieter: a pid copied
+from `ps` inside a container matches nothing in the kernel, and the tool
+reports a busy process as idle. So the tool checks whether it is in the
+initial pid namespace — the kernel gives that one a fixed inode,
+`PROC_PID_INIT_INO` — and says so when it is not.
+
+**Consequences.** Carrying a 16-byte name in the map value costs one copy per
+process rather than per event, since it is only written by the insert that
+first sees a process. The name is therefore the one it had when first seen; a
+process that `exec`s later keeps the old one, which is the right trade for a
+counter and would be the wrong one for an audit log.
 
 ### CO-RE, not BCC
 
