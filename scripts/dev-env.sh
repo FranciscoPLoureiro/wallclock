@@ -19,10 +19,24 @@ GOLANGCI_VERSION="${GOLANGCI_VERSION:-v2.12.2}"
 # ground-truth validation later injects delay with `tc netem`, and finding it
 # missing at that point costs a rebuild of the environment.
 APT_PACKAGES=(
-	clang llvm libbpf-dev bpftool
+	clang llvm libbpf-dev
 	git make gcc libelf-dev zlib1g-dev pkg-config
 	curl ca-certificates iproute2
 )
+
+# bpftool is a real package on Debian and a virtual one on Ubuntu, where the
+# binary ships inside linux-tools-common. Naming the wrong one does not skip a
+# package, it aborts the entire install with "has no installation candidate",
+# so the name is resolved against the archive rather than assumed.
+bpftool_package() {
+	local candidate
+	candidate="$(apt-cache policy bpftool 2>/dev/null | awk '/Candidate:/ {print $2}')"
+	if [ -n "$candidate" ] && [ "$candidate" != "(none)" ]; then
+		echo bpftool
+	else
+		echo linux-tools-common
+	fi
+}
 
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 
@@ -38,7 +52,8 @@ need_root() {
 install_packages() {
 	say "apt packages"
 	DEBIAN_FRONTEND=noninteractive apt-get update -qq
-	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
+	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+		"${APT_PACKAGES[@]}" "$(bpftool_package)"
 }
 
 install_go() {
@@ -98,7 +113,12 @@ report() {
 	say "installed"
 	/usr/local/go/bin/go version
 	clang --version | head -1
-	bpftool version | head -1
+	# On Ubuntu this is a wrapper that dispatches to a linux-tools package
+	# built for the running kernel, which does not exist for every cloud
+	# kernel. bpftool is used for inspection and to generate vmlinux.h, never
+	# in the build, so a missing one is worth printing and not worth failing
+	# over -- hence 2>&1 rather than a check.
+	printf 'bpftool %s\n' "$(bpftool version 2>&1 | head -1)"
 	printf 'kernel  %s\n' "$(uname -r)"
 	printf 'BTF     %s\n' \
 		"$([ -r /sys/kernel/btf/vmlinux ] && echo present || echo MISSING)"
