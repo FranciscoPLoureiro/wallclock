@@ -1,0 +1,43 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    # This project's failure modes are not the usual ones. It holds file
+    # descriptors for programs, maps and links that stay resident in the
+    # kernel until closed, and it reads numbers out of the kernel that
+    # nothing else will contradict if they are wrong. The additions are
+    # weighted towards leaks and swallowed errors rather than towards style.
+    - errorlint # == on errors breaks the moment something wraps them
+    - gosec # the repository is public; obvious weaknesses should not be
+    - misspell
+    - nilerr # returning nil after a non-nil error hides real failures
+    - revive
+    - unconvert
+    - wastedassign
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          # Exported identifiers carry the explanation of why they exist.
+          disabled: false
+
+  exclusions:
+    presets:
+      - comments
+      - common-false-positives
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          # Test fixtures are not attack surface.
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

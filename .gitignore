@@ -1,0 +1,29 @@
+# Build outputs. The BPF objects are compiled from the C in bpf/ by
+# `make bpf`; a committed object is one that can silently disagree with the
+# source it was built from.
+/bin/
+/build/
+*.test
+
+# Coverage
+coverage.out
+coverage.html
+
+# The assignment brief. Kept on disk, deliberately not published: it is in
+# Portuguese, it is written for the author, and it carries a phase checklist
+# whose boxes are unticked until the last one is done -- which reads, to
+# anyone landing on the repository, as an abandoned project.
+enunciado-latencia-ebpf.md
+
+# Working notes across sessions: decisions and why, what this machine refuses
+# to do, verifier rejections and their fixes, dead ends. The reasoning that
+# earns its place ends up in the README as a decision; this is the scratch
+# paper it came from.
+NOTES.md
+
+# Editors and OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

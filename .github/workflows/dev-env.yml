@@ -1,0 +1,51 @@
+name: dev-env
+
+# scripts/dev-env.sh is the answer to "how do I build this", and an install
+# script that is only ever run on machines where the packages are already
+# present rots without anyone noticing. This runs it end to end on a clean
+# machine.
+#
+# It is not part of CI on every push, because it downloads a Go toolchain and
+# builds a linter from source to prove something that changes rarely. It runs
+# when the script changes, once a week to catch an upstream that moved, and on
+# demand.
+on:
+  push:
+    paths:
+      - scripts/dev-env.sh
+      - .github/workflows/dev-env.yml
+  pull_request:
+    paths:
+      - scripts/dev-env.sh
+      - .github/workflows/dev-env.yml
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    name: provision a clean host
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run the provisioning script
+        # WALLCLOCK_USER because the script installs golangci-lint into a
+        # user's GOPATH and has to work out whose. Under sudo it reads
+        # SUDO_USER; under `wsl -u root` there is no such hint and it falls
+        # back to the first ordinary account. A runner has both, so the
+        # variable makes the choice explicit rather than incidental.
+        run: sudo WALLCLOCK_USER=runner bash scripts/dev-env.sh
+
+      - name: Build with only what the script installed
+        # PATH is set from /etc/profile.d/go.sh, which is the file the script
+        # writes: if that part is wrong, this step is where it shows.
+        run: |
+          . /etc/profile.d/go.sh
+          make bpf
+          make build
+          sudo ./bin/wallclock preflight

@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A run whose commit has already been superseded tells nobody anything and
+# occupies a runner that the current commit needs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege by default. A job that needs more asks for it explicitly.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: build, lint and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          # Read the version from go.mod so the toolchain can never drift
+          # away from what the module declares.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install the BPF toolchain
+        # clang cross-compiles to BPF, llvm supplies llvm-strip, and
+        # libbpf-dev supplies the bpf_helpers.h the programs include. The
+        # runner image already carries a clang, but not necessarily an
+        # unversioned llvm-strip, and not libbpf's headers.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang llvm libbpf-dev
+
+      - name: Verify go.mod is tidy
+        # A stale go.mod passes locally and fails for the next person to
+        # clone. Cheaper to catch here than in someone else's checkout.
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Compile the BPF programs
+        run: make bpf
+
+      - name: Build
+        run: go build ./...
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          # Pinned rather than "latest": a new release adding a check should
+          # be a deliberate commit, not a build that breaks on a Tuesday.
+          version: v2.12.2
+
+      - name: Test
+        # The tests that need a kernel skip for an unprivileged user, which is
+        # what this job is. The kernel job below is where they are made to run.
+        run: go test -race -shuffle=on ./...
+
+  kernel:
+    name: load into a real kernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The assumption this job exists to test: that a hosted runner has BTF and
+    # will let a program be loaded with sudo. It is plausible and it is load
+    # bearing -- if it is false, every phase after this one needs a different
+    # CI strategy -- so it is checked on the first day rather than assumed for
+    # three months. A pipeline that only compiles proves nothing: clang
+    # accepts programs the verifier rejects, and the verifier is the hard part.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install the BPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang llvm libbpf-dev
+
+      - name: Record what kernel this runner is
+        # Recorded because the runner image changes without asking, and when a
+        # load starts failing the first question is what moved. An assertion
+        # that passed against an unrecorded kernel is not evidence of much.
+        #
+        # Piped through tee into both the job summary and the log. The summary
+        # is the readable one; the log is the one that is still there when the
+        # question is asked weeks later against a run nobody thought to look at.
+        run: |
+          {
+            echo '### Runner kernel'
+            echo
+            echo '```'
+            echo "uname -r        $(uname -r)"
+            echo "BTF             $(ls -l /sys/kernel/btf/vmlinux 2>&1)"
+            echo "cgroup fs       $(stat -fc %T /sys/fs/cgroup)"
+            echo "controllers     $(cat /sys/fs/cgroup/cgroup.controllers)"
+            echo "clang           $(clang --version | head -1)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the host against the requirements
+        # preflight ends by loading a two-instruction program, so this step
+        # fails on a runner that cannot run this project at all -- and says
+        # which requirement was the one missing.
+        run: |
+          make build
+          sudo ./bin/wallclock preflight | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Compile, load and attach
+        # make smoke sets WALLCLOCK_REQUIRE_BPF=1, which turns the
+        # unprivileged skip inside the test into a failure. Without it a
+        # runner that refused to load anything would report a green tick for
+        # a suite that did nothing.
+        run: make smoke
