@@ -65,6 +65,43 @@ jobs:
         # what this job is. The kernel job below is where they are made to run.
         run: go test -race -shuffle=on ./...
 
+  generated:
+    name: generated bindings are current
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # bpf2go output is committed so that `go build` works on a fresh clone
+    # with no clang in sight. Committed generated code drifts from its source
+    # the first time somebody edits the C and forgets to regenerate, and the
+    # result is a binary that quietly runs the previous program.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install the BPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang llvm libbpf-dev
+
+      - name: Regenerate
+        run: make generate
+
+      - name: The Go bindings must match the C
+        # Only the generated Go is compared. The embedded object is not: the
+        # runner has clang 18 and this is developed against clang 19, and two
+        # clang versions produce different bytes from identical source. A byte
+        # comparison would fail for a reason that has nothing to do with
+        # drift, and a check that cries wolf gets deleted.
+        #
+        # The Go side is derived from BTF -- the maps, the programs, the
+        # variables and the struct layouts -- so it changes exactly when the
+        # interface between kernel and userspace changes, which is the drift
+        # worth catching.
+        run: git diff --exit-code -- '*_bpfel.go'
+
   kernel:
     name: load into a real kernel
     runs-on: ubuntu-latest
