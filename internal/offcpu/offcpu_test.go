@@ -26,6 +26,26 @@ const (
 	spinnerName = "wc-spinner"
 )
 
+// processComm is this binary's own thread name, captured before any test has
+// had a chance to change one.
+//
+// It cannot be read on demand. /proc/self/comm reports the name of the thread
+// group leader, the tests rename threads, and runtime.LockOSThread can hand a
+// goroutine the main thread -- so a test that renames its subject can rename
+// the process. Reading it later then reports "wc-sleeper" as this binary's
+// name and every genuine thread looks like an intruder, which is precisely
+// what it did.
+var processComm string
+
+func TestMain(m *testing.M) {
+	raw, err := os.ReadFile("/proc/self/comm")
+	if err != nil {
+		panic("cannot read this process's own name: " + err.Error())
+	}
+	processComm = strings.TrimSpace(string(raw))
+	os.Exit(m.Run())
+}
+
 // nameThisThread pins the goroutine to its OS thread and names that thread.
 //
 // The pinning is not decoration: without it the goroutine can be moved to
@@ -272,10 +292,4 @@ func inInitialNamespace() (bool, error) {
 
 // isThisProcessThread reports whether a comm could belong to this test binary.
 // Go names its runtime threads after the process, truncated to 15 characters.
-func isThisProcessThread(comm string) bool {
-	raw, err := os.ReadFile("/proc/self/comm")
-	if err != nil {
-		return false
-	}
-	return comm == strings.TrimSpace(string(raw))
-}
+func isThisProcessThread(comm string) bool { return comm == processComm }
