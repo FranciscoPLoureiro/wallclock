@@ -1,2 +1,19 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Everything here is executed by Linux. A CRLF in a shell script makes the
+# interpreter line end in \r and the kernel report "bad interpreter"; a CRLF
+# in a Makefile recipe is passed to the shell as part of the command. The
+# repository is edited from a Windows host, so these are declared rather than
+# assumed.
+*.sh    text eol=lf
+*.c     text eol=lf
+*.h     text eol=lf
+*.go    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+Makefile text eol=lf
+
+# Compiled BPF objects are binary if one is ever committed by accident; saying
+# so keeps a diff from being rendered as mangled text.
+*.o     binary
