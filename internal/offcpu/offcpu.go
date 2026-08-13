@@ -116,6 +116,7 @@ func Open(targetPID int) (_ *Session, err error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("raise RLIMIT_MEMLOCK: %w", err)
 	}
+	raiseMemlockForPerfEvents()
 
 	spec, err := loadOffcpu()
 	if err != nil {
@@ -288,6 +289,29 @@ func (s *Session) Close() error {
 	s.links = nil
 	errs = append(errs, s.objs.Close())
 	return errors.Join(errs...)
+}
+
+// raiseMemlockForPerfEvents lifts RLIMIT_MEMLOCK, which attaching to a
+// tracepoint still needs even on a kernel where loading BPF does not.
+//
+// cilium/ebpf's rlimit.RemoveMemlock covers BPF maps and programs, and from
+// 5.11 those are charged to the memory cgroup instead, so on a modern kernel
+// it correctly does nothing. Perf events did not move: their ring buffers are
+// still charged against RLIMIT_MEMLOCK and perf_event_mlock_kb, and every
+// tracepoint attachment is a perf event.
+//
+// The symptom of not doing this was a session that attached three programs
+// and was refused the fourth with EPERM -- only under sudo, which applies the
+// PAM limits, and never when run as root directly, which does not. That is a
+// difference between CI and a development machine, so it fails in the place
+// least convenient to debug.
+//
+// Best effort on purpose. It needs CAP_SYS_RESOURCE, which anything able to
+// load these programs already has, and where the limit is already generous
+// there is nothing to do.
+func raiseMemlockForPerfEvents() {
+	unlimited := unix.Rlimit{Cur: unix.RLIM_INFINITY, Max: unix.RLIM_INFINITY}
+	_ = unix.Setrlimit(unix.RLIMIT_MEMLOCK, &unlimited)
 }
 
 // monotonicNow reads the same clock bpf_ktime_get_ns reads.
