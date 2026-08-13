@@ -105,14 +105,16 @@ load a tracepoint program is not satisfied.
 Both of these are checked by the same command, and the CI one runs on every
 pull request.
 
-| Host | Kernel | BTF | cgroup | Result |
-|---|---|---|---|---|
-| WSL2, Debian 13 (development) | `6.6.87.2-microsoft-standard-WSL2` | present, `task_struct` 240 members | v2, `cpu` delegated | all requirements met |
-| GitHub Actions `ubuntu-latest` (CI) | `6.17.0-1022-azure` | present, `task_struct` 266 members | v2, `cpu` delegated | all requirements met |
+| Host | Kernel | BTF | cgroup | clang | Result |
+|---|---|---|---|---|---|
+| WSL2, Debian 13 (development) | `6.6.87.2-microsoft-standard-WSL2` | 6 050 732 bytes, `task_struct` 240 members | v2, `cpu` delegated | 19.1.7 | all requirements met |
+| GitHub Actions `ubuntu-latest` (CI) | `6.17.0-1022-azure` | 6 841 206 bytes, `task_struct` 266 members | v2, `cpu` delegated | 18.1.3 | all requirements met |
 
 The two kernels differ by eleven minor versions and report `task_struct` with
 a different number of members — which is the argument for CO-RE stated as a
-measurement rather than as a principle. See the README for that decision.
+measurement rather than as a principle. See the README for that decision. The
+two clang versions differ as well, which is a second thing this pair happens
+to hold constant only because it is checked.
 
 ## Known gaps
 

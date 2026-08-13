@@ -127,6 +127,10 @@ runner's kernel, and attaches one:
 
 ```
 uname -r        6.17.0-1022-azure
+BTF             -r--r--r-- 1 root root 6841206 Aug 13 15:29 /sys/kernel/btf/vmlinux
+cgroup fs       cgroup2fs
+controllers     cpuset cpu io memory hugetlb pids rdma misc dmem
+clang           Ubuntu clang version 18.1.3 (1ubuntu1)
 
 requirement                status  found
 kernel >= 5.8              ok      6.17.0-1022-azure (parsed as 6.17)
