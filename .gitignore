@@ -27,3 +27,6 @@ NOTES.md
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Objects compiled from testdata fixtures. Built by make bpf, never committed.
+internal/*/testdata/*.bpf.o
