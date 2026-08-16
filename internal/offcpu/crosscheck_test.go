@@ -85,7 +85,7 @@ func TestOnCPUAgreesWithTheKernelsOwnAccounting(t *testing.T) {
 
 	const (
 		spin = 900 * time.Millisecond
-		name = "wc-crosschk"
+		name = testThreadPrefix + "crosschk"
 	)
 
 	var kernelSays time.Duration

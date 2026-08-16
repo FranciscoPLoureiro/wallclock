@@ -22,8 +22,13 @@ import (
 // the tests locate their subjects by something that does not depend on where
 // they are run.
 const (
-	sleeperName = "wc-sleeper"
-	spinnerName = "wc-spinner"
+	// testThreadPrefix marks every thread name this package assigns, so the
+	// filter test can tell its own subjects from an intruder without keeping
+	// a list in step with the tests that create them.
+	testThreadPrefix = "wc-"
+
+	sleeperName = testThreadPrefix + "sleeper"
+	spinnerName = testThreadPrefix + "spinner"
 )
 
 // processComm is this binary's own thread name, captured before any test has
@@ -283,7 +288,13 @@ func TestFilteringToAProcessExcludesTheRestOfTheMachine(t *testing.T) {
 	// after the test binary; anything else means the filter let the machine
 	// through.
 	for _, thread := range threads {
-		if thread.Comm == sleeperName || thread.Comm == spinnerName {
+		// Threads this binary named itself, in this test or an earlier one.
+		// A prefix rather than a list: the names outlive the tests that set
+		// them, because the Go runtime keeps the thread and hands it to the
+		// next goroutine, so a test added later would otherwise be reported
+		// here as an intruder. That is exactly what happened when the
+		// cross-check test introduced a third name.
+		if strings.HasPrefix(thread.Comm, testThreadPrefix) {
 			continue
 		}
 		if !isThisProcessThread(thread.Comm) {

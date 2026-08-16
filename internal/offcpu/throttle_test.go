@@ -42,7 +42,7 @@ func TestAThrottledThreadIsNotJustQueued(t *testing.T) {
 
 	const (
 		spin = 2 * time.Second
-		name = "wc-throttled"
+		name = testThreadPrefix + "throttled"
 	)
 
 	// A separate process rather than a thread of this one, for two reasons.
