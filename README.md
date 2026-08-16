@@ -442,23 +442,36 @@ and the OS thread sits in `epoll_wait`; that thread is idle, not slow, and
 calling it network would report a healthy server as spending its life waiting
 on sockets.
 
-**Consequences, including one that is unresolved.** On a busy machine the
-reasons for some threads add to a few per cent — up to 18% seen — *more* than
-the blocked time they are supposed to explain. That cannot be true of the same
-intervals. The obvious explanation is ruled out rather than assumed: the two
-totals are read about a millisecond apart, which does not buy 900 ms. The
-candidates still open are stack ids being recycled between threads and an
-interval being credited twice somewhere in the state machine.
+**The bug this found, and how the wrong diagnosis nearly buried it.** For a
+while the reasons for some threads added to *more* than the blocked time they
+explain — up to 18% over, which cannot be true of the same intervals. It was
+printed, labelled a known defect, and deliberately not clamped, because a
+report that always adds up and is sometimes wrong is the failure this project
+is arranged against.
 
-It is printed, labelled, and not clamped:
+The first explanation was that the two totals are read about a millisecond
+apart. That was written down, and it was wrong — not because the mechanism was
+wrong but because the bound was. **What lands in the gap between two reads is
+not the length of the gap; it is the whole of whatever wait happened to close
+during it.** A thread blocked for 900 ms whose wait ends in that millisecond
+contributes 900 ms, twice: once as the open wait the totals measured, once as
+the completed row the kernel filed a moment later.
+
+Finding it took one measurement rather than more reasoning — print every row
+for the worst thread — and the answer was immediate: one row was byte for byte
+the open interval.
 
 ```
-            (excess) 18.3% 915.7ms OVER the blocked total -- known defect
+row 5.676ms      sleep   ..do_nanosleep
+row 1.999982733s futex   ..futex_wait_queue
+row 78.213µs     sleep   ..do_nanosleep     <- open=78.213µs, counted twice
 ```
 
-Clamping it would produce a report that always adds up and is sometimes
-wrong, which is the failure this project is arranged against. A number that
-disagrees with itself in public is the only thing that gets a cause found.
+The fix is an ordering: rows first, totals second, open waits added last. Read
+that way the failure inverts and becomes honest — an interval that completes
+between the two reads is in neither, so it goes unattributed and says so. A
+test asserts on every run that no thread is ever over-attributed, because the
+two calls look interchangeable and are not.
 
 ### Blocked time and runqueue delay are different numbers
 

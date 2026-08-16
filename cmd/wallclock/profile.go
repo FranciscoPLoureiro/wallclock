@@ -80,21 +80,31 @@ func runProfile(args []string) error {
 		return err
 	}
 
+	// Reasons before the thread totals, and the order is load bearing: a wait
+	// that is open when the totals are read can end a moment later, and the
+	// kernel then files it as a completed row. Reading the rows second counts
+	// that interval twice. See BlockedReasons.
+	var (
+		blocked []offcpu.Blocked
+		symbols *ksyms.Table
+	)
+	wantReasons := *reasons || *folded != ""
+	if wantReasons {
+		var err error
+		if symbols, err = ksyms.Load(); err != nil {
+			return fmt.Errorf("naming kernel stacks: %w", err)
+		}
+		if blocked, err = session.BlockedReasons(symbols); err != nil {
+			return err
+		}
+	}
+
 	threads, err := session.Threads()
 	if err != nil {
 		return err
 	}
-
-	// Reasons after the thread totals, and read against them: the open wait
-	// each thread is still in needs its duration, and the rows belonging to
-	// threads that have gone need dropping.
-	var blocked []offcpu.Blocked
-	if *reasons || *folded != "" {
-		symbols, err := ksyms.Load()
-		if err != nil {
-			return fmt.Errorf("naming kernel stacks: %w", err)
-		}
-		if blocked, err = session.BlockedReasons(symbols, threads); err != nil {
+	if wantReasons {
+		if blocked, err = session.AttributeOpenWaits(blocked, threads, symbols); err != nil {
 			return err
 		}
 	}

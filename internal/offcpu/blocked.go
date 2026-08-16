@@ -52,34 +52,30 @@ func (b Blocked) Folded(comm string) string {
 // they are the same intervals counted a second way. Where they do not, some
 // blocked time has no reason attached to it, which the report says rather
 // than quietly rounding the categories up to the total.
-// The threads it is given are used for two things: to attribute the wait each
-// one is still in the middle of, and to drop the rows belonging to threads
-// that are gone. Pass the slice from Threads, read at the same moment.
-func (s *Session) BlockedReasons(symbols *ksyms.Table, threads []Thread) ([]Blocked, error) {
+// **Call this before Threads, and the order is not a style choice.** A wait
+// that is open when Threads reads it can end a moment later, at which point
+// the kernel files it here -- so reading this map second means the same
+// interval arrives twice: once as the open wait Threads measured, once as the
+// completed row the kernel wrote in between. That produced reasons totalling
+// 18% more than the blocked time they explain, which is impossible, and the
+// magnitude misled the first diagnosis: what lands in the gap is not the gap,
+// it is the whole of whatever wait happened to close during it.
+//
+// Read first, the failure inverts and becomes honest. An interval that
+// completes between the two reads is in neither, so it goes unattributed and
+// is reported as such.
+func (s *Session) BlockedReasons(symbols *ksyms.Table) ([]Blocked, error) {
 	if symbols == nil {
 		return nil, errors.New("a symbol table is required to name stacks")
 	}
 
-	live := make(map[uint32]struct{}, len(threads))
-	for _, t := range threads {
-		live[t.TID] = struct{}{}
-	}
-
 	var (
 		out   []Blocked
-		stale []offcpuBlockedKey
 		key   offcpuBlockedKey
 		total uint64
 	)
 	iter := s.objs.BlockedBy.Iterate()
 	for iter.Next(&key, &total) {
-		if _, ok := live[key.Tid]; !ok {
-			// The thread is gone and its entry has been drained, so nothing
-			// will ever ask about these rows again. Left in place they are a
-			// map that only grows, on a machine with process churn.
-			stale = append(stale, key)
-			continue
-		}
 		frames, err := s.stackFrames(key.StackId, symbols)
 		if err != nil {
 			return nil, err
@@ -94,19 +90,32 @@ func (s *Session) BlockedReasons(symbols *ksyms.Table, threads []Thread) ([]Bloc
 	if err := iter.Err(); err != nil {
 		return nil, fmt.Errorf("iterate the blocked-by map: %w", err)
 	}
+	return out, nil
+}
 
-	for _, dead := range stale {
-		if err := s.objs.BlockedBy.Delete(dead); err != nil &&
-			!errors.Is(err, ebpf.ErrKeyNotExist) {
-			return nil, fmt.Errorf("remove the reasons of exited thread %d: %w",
-				dead.Tid, err)
-		}
+// AttributeOpenWaits adds the wait each thread is still in the middle of, and
+// drops the rows of threads that are gone.
+//
+// Call it after Threads, with the reasons BlockedReasons returned before it.
+// The open wait has not ended, so nothing has filed it, and it is usually the
+// largest single thing a thread did -- without this every thread that spent
+// the window waiting reports "unattributed" against all of it.
+func (s *Session) AttributeOpenWaits(blocked []Blocked, threads []Thread,
+	symbols *ksyms.Table,
+) ([]Blocked, error) {
+	live := make(map[uint32]struct{}, len(threads))
+	for _, t := range threads {
+		live[t.TID] = struct{}{}
 	}
 
-	// The wait each thread is still in the middle of. It has not ended, so
-	// nothing has filed it, and it is usually the largest single thing a
-	// thread did -- a report without it puts "unattributed" against every
-	// thread that spent the window waiting.
+	kept := blocked[:0]
+	for _, b := range blocked {
+		if _, ok := live[b.TID]; ok {
+			kept = append(kept, b)
+		}
+	}
+	out := kept
+
 	for _, t := range threads {
 		if t.OpenBlocked <= 0 || t.OpenBlockedStack < 0 {
 			continue
@@ -121,6 +130,29 @@ func (s *Session) BlockedReasons(symbols *ksyms.Table, threads []Thread) ([]Bloc
 			Stack:    frames,
 			Duration: t.OpenBlocked,
 		})
+	}
+
+	// The rows of threads that have gone. Their entries were drained by
+	// Threads, so nothing will ask about these again, and left in place they
+	// are a map that only grows on a machine with process churn.
+	var key offcpuBlockedKey
+	var total uint64
+	var stale []offcpuBlockedKey
+	iter := s.objs.BlockedBy.Iterate()
+	for iter.Next(&key, &total) {
+		if _, ok := live[key.Tid]; !ok {
+			stale = append(stale, key)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("iterate the blocked-by map: %w", err)
+	}
+	for _, dead := range stale {
+		if err := s.objs.BlockedBy.Delete(dead); err != nil &&
+			!errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil, fmt.Errorf("remove the reasons of exited thread %d: %w",
+				dead.Tid, err)
+		}
 	}
 	return out, nil
 }

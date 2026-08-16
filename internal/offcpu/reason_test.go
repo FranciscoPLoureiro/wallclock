@@ -120,13 +120,16 @@ func TestABlockedSocketReadIsClassifiedAsNetwork(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 
+	blocked, err := session.BlockedReasons(symbols)
+	if err != nil {
+		t.Fatalf("blocked reasons: %v", err)
+	}
 	threads, err := session.Threads()
 	if err != nil {
 		t.Fatalf("threads: %v", err)
 	}
-	blocked, err := session.BlockedReasons(symbols, threads)
-	if err != nil {
-		t.Fatalf("blocked reasons: %v", err)
+	if blocked, err = session.AttributeOpenWaits(blocked, threads, symbols); err != nil {
+		t.Fatalf("attributing open waits: %v", err)
 	}
 
 	var networkStack []string
