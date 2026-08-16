@@ -28,12 +28,15 @@ window: 30s
                               100.0%
 ```
 
-**None of that exists yet.** The block above is the target, not a screenshot;
-it is here because the shape of the answer is the design, and because the two
-lines that matter — *runqueue* and *throttled* — are the reason the project
-exists rather than a nicety. Phase 0 is done and it is the environment, the
-skeleton and the proof that the pipeline can work at all. What runs today is
-at [what works now](#what-works-now).
+**The block above is the target, not a screenshot.** Everything in it except
+the per-destination network breakdown is measured today: on-CPU, runqueue
+delay, cgroup throttling, and blocked time split by what the thread was
+waiting on. Attributing network time to individual destinations is phase 4.
+The real output is at [what works now](#what-works-now).
+
+The two lines that matter are *runqueue* and *throttled*, and they are the
+reason the project exists rather than a nicety: they look identical from
+outside and they are opposite problems.
 
 **The percentages summing to 100% is the point.** Existing tools report loose
 quantities that do not compose: `offcputime` gives off-CPU stacks without
@@ -49,7 +52,7 @@ of them produce.
 |---|---|---|
 | 0 | Environment, repository, CI that loads BPF into a real kernel | ✅ done |
 | 1 | First program end to end: map aggregation and a ring buffer path | ✅ done |
-| 2 | Off-CPU, runqueue delay, and cgroup throttling separated | 🔨 on-CPU, runqueue and blocked done; throttling next |
+| 2 | Off-CPU, runqueue delay, and cgroup throttling separated | ✅ done |
 | 3 | What the Go runtime makes invisible from the kernel's side | planned |
 | 4 | Network time attributed to individual destinations | planned |
 | 5 | Validation against injected latency, and measured overhead | planned |
@@ -262,6 +265,86 @@ nothing.
 The format is deliberate: context, the options actually considered, the
 decision, and what it costs.
 
+### A thread seen for the first time halfway through
+
+**Context.** A profiler that starts while the machine is already running sees
+threads in the middle of their lives. A thread first appears in a
+`sched_switch` or a wakeup, and everything before that instant is unknown to
+the tool — but not unknown in principle, since `/proc` has been keeping score
+all along.
+
+**Options.** Count the missing time as zero, seed each thread's state from
+`/proc` at startup, or start each thread's accounting at first sight and say
+so.
+
+**Decision.** Start at first sight, and report the span each thread was
+*observed* rather than the length of the session.
+
+Counting the gap as zero is the tempting one and it is wrong in a way that
+does not announce itself: percentages of the session window would come out
+right for threads that were there from the start and quietly understate every
+thread that arrived later, and nothing in the output would distinguish them.
+Seeding from `/proc` is defensible and buys less than it looks: it can say a
+thread was sleeping at t=0 but not what it had been doing, so it replaces an
+honest gap with a state that is only half known.
+
+The tail end is handled by the opposite rule. **Which event brings news of a
+thread decides what may be done with it**, and this is the part that took four
+attempts:
+
+| Event | May create an entry | May revive an exited one |
+|---|---|---|
+| switch-out | yes | no |
+| switch-in, wakeup | yes | no |
+| `wakeup_new` | yes | yes |
+| exit | plants a headstone | — |
+
+A dying thread's last act is a context switch, moments after its exit event,
+and a tid is handed to somebody new soon after that. Both arrive at the same
+map entry and mean opposite things. `wakeup_new` is the only event that means
+"this task did not exist until now", so it is the only one allowed to start
+the books over.
+
+**Consequences.** A thread that never schedules during the window does not
+appear at all — a process blocked from before the session began and still
+blocked at the end is invisible. That is the honest report of a tool that
+watches the scheduler, and it is stated here rather than left to be
+discovered.
+
+### What happens when the maps fill up
+
+**Context.** Every map has a `max_entries`. Threads, target sets, cgroups and
+blocked reasons all grow with the machine, and a BPF map that fills does not
+raise anything: the insert simply fails.
+
+**Decision.** Every failure is counted, and every counter is printed in the
+report, whether or not it fired.
+
+A full map is the worst failure available to a measurement tool, because it
+does not look like one. The numbers stay plausible, the percentages still add
+to 100%, and the tool has silently stopped seeing part of the machine. The
+counters are the difference between a report that is incomplete and a report
+that is incomplete *and says so*:
+
+```
+LOST 50000 scheduler events: the threads map is at max_entries, so some
+threads are missing from this report entirely rather than misfiled. That is
+events, not threads -- one untracked thread contributes one per context switch
+```
+
+That message is the second version. The first said "LOST 50000 threads
+entirely" on a machine with three hundred threads, because the counter counts
+events and was labelled as though it counted threads. A number the reader can
+see is impossible destroys the credibility of every line around it, which is
+the opposite of what a drop counter is for.
+
+**Consequences.** The bounds are 16384 threads, 16384 targets, 4096 cgroups,
+8192 distinct stacks and 32768 thread-and-stack pairs. Exited threads are
+drained on every read, and their blocked reasons with them, which is what
+keeps a machine with heavy process churn from reaching those bounds at all —
+a twelve second window on a build machine produced 660 entries where ninety
+threads existed, before that draining was added.
+
 ### Throttling, measured twice
 
 **Context.** Runqueue delay answers "this thread was ready and did not run"
@@ -298,6 +381,16 @@ Ninety-one microseconds apart in 1.6 seconds, and a ratio of 1.0001 over
 three consecutive runs. A test asserts it on every run, because the value of
 a second opinion is that it keeps being asked.
 
+**If the kernel had no throttling hooks.** `throttle_cfs_rq` is static and
+could stop being reachable; a kernel could be built without
+`CONFIG_CFS_BANDWIDTH` at all. The fallback is `cpu.stat`, polled from
+userspace: `nr_throttled` and `throttled_usec` are always there when the
+controller is, and a poll every few milliseconds bounds the windows to the
+poll interval. That is enough to say *whether* a cgroup was throttled during
+a thread's wait and useless for saying *how much* of a two-millisecond wait it
+covered — so the categories would survive and their precision would not. It
+is a real answer and a worse one, which is why it is the fallback.
+
 **Consequences.** A thread's cgroup is learned from
 `bpf_get_current_cgroup_id`, which answers for the *running* task — so a
 thread learns its own cgroup when it is scheduled out, not when it is woken,
@@ -305,10 +398,67 @@ where the running task is whoever did the waking. Until then its waits are
 filed as ordinary runqueue delay. In practice that is one scheduling round,
 and threads change cgroup about as often as they change process.
 
+That id is also what `-cgroup` filters on, and it is the one filter that works
+from anywhere: cgroup ids are global, and pids are not. Every namespace
+problem in this project — a `-pid` that matches nothing, a `/proc` lookup that
+names the wrong process, a test that cannot find its own subject — comes back
+to that difference.
+
 The cgroup map is bounded like every other, and when it fills, that cgroup's
 throttling becomes invisible and its threads' waits go back to looking like
 contention — the two categories this whole section exists to separate,
 silently merged again. So it is counted and reported rather than absorbed.
+
+### Why a thread stopped, and one number that does not add up
+
+**Context.** "Blocked 22%" is half an answer. Waiting on a socket, waiting on
+a mutex and waiting on a disk are one event to the scheduler and three
+different problems to whoever has to fix one.
+
+**Decision.** Capture the kernel stack with `bpf_get_stackid` at the moment
+the thread stops, and classify it in userspace.
+
+At that moment and no other: the thread is still on the CPU it is leaving and
+the frames underneath it are the call that decided to stop. Only for a thread
+that is actually stopping — a preempted thread's stack describes whatever it
+was in the middle of, which is not a reason for anything.
+
+Classification is in userspace because BPF cannot turn an address into a
+symbol, and because the addresses are wanted whole in any case for the flame
+graph. Stacks are scanned innermost first, past the `schedule` frames that sit
+on top of every wait there is, until something meaningful appears:
+
+```
+$ sudo wallclock profile -for 5s -reasons
+  149161  5.01s  0.0% 864µs  0.0% 530µs  0.0% 0s  100.0% 5.01s  wallclock
+            futex    99.8% 5s
+  142781  5.01s  0.0% 296µs  0.0% 699µs  0.0% 0s  100.0% 5.01s  kworker/15:3
+            other    100.0% 5.01s
+```
+
+**epoll gets its own category** rather than being folded into network, and
+that is phase 3 arriving early. A Go runtime parks goroutines in a netpoller
+and the OS thread sits in `epoll_wait`; that thread is idle, not slow, and
+calling it network would report a healthy server as spending its life waiting
+on sockets.
+
+**Consequences, including one that is unresolved.** On a busy machine the
+reasons for some threads add to a few per cent — up to 18% seen — *more* than
+the blocked time they are supposed to explain. That cannot be true of the same
+intervals. The obvious explanation is ruled out rather than assumed: the two
+totals are read about a millisecond apart, which does not buy 900 ms. The
+candidates still open are stack ids being recycled between threads and an
+interval being credited twice somewhere in the state machine.
+
+It is printed, labelled, and not clamped:
+
+```
+            (excess) 18.3% 915.7ms OVER the blocked total -- known defect
+```
+
+Clamping it would produce a report that always adds up and is sometimes
+wrong, which is the failure this project is arranged against. A number that
+disagrees with itself in public is the only thing that gets a cause found.
 
 ### Blocked time and runqueue delay are different numbers
 

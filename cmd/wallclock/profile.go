@@ -11,6 +11,7 @@ import (
 
 	"github.com/FranciscoPLoureiro/wallclock/internal/ksyms"
 	"github.com/FranciscoPLoureiro/wallclock/internal/offcpu"
+	"github.com/FranciscoPLoureiro/wallclock/internal/syscount"
 )
 
 const profileUsage = `wallclock profile - split wall clock into on-CPU, runqueue and blocked
@@ -23,6 +24,8 @@ flags:
   -for DURATION   how long to observe (default 10s)
   -top N          how many threads to show, busiest first (default 15)
   -comm SUBSTRING only threads whose name contains this
+  -cgroup PATH    only threads in this cgroup, e.g. a container directory
+                  under /sys/fs/cgroup
   -reasons        break blocked time down by what was being waited for
   -folded FILE    write off-CPU folded stacks for flamegraph.pl
 `
@@ -35,11 +38,26 @@ func runProfile(args []string) error {
 		window  = fs.Duration("for", 10*time.Second, "")
 		top     = fs.Int("top", 15, "")
 		comm    = fs.String("comm", "", "")
+		cgroup  = fs.String("cgroup", "", "")
 		reasons = fs.Bool("reasons", false, "")
 		folded  = fs.String("folded", "", "")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// A cgroup is named by a path and matched by the id the kernel gives it.
+	// Unlike a pid that id means the same thing inside a container and out,
+	// which makes this the one filter that works from anywhere -- and the
+	// answer to the namespace problem that has turned up at every stage of
+	// this project.
+	var cgroupID uint64
+	if *cgroup != "" {
+		id, err := syscount.CgroupIDOf(*cgroup)
+		if err != nil {
+			return err
+		}
+		cgroupID = id
 	}
 
 	session, err := offcpu.Open(*pid)
@@ -89,6 +107,17 @@ func runProfile(args []string) error {
 	if observed == 0 {
 		fmt.Fprintln(os.Stdout, "no threads were observed at all")
 		return reportProfileDrops(session)
+	}
+	if cgroupID != 0 {
+		threads = filterByCgroup(threads, cgroupID)
+		if len(threads) == 0 {
+			fmt.Fprintf(os.Stdout,
+				"%d threads were observed, none in %s (cgroup id %d). A thread is "+
+					"placed in its cgroup the first time it is seen leaving a CPU, "+
+					"so one that never ran during the window is not there yet.\n",
+				observed, *cgroup, cgroupID)
+			return reportProfileDrops(session)
+		}
 	}
 	if *comm != "" {
 		threads = filterByComm(threads, *comm)
@@ -178,6 +207,16 @@ func runProfile(args []string) error {
 	// did, which is the failure this whole project is arranged against.
 	reportResiduals(threads)
 	return reportProfileDrops(session)
+}
+
+func filterByCgroup(threads []offcpu.Thread, id uint64) []offcpu.Thread {
+	var kept []offcpu.Thread
+	for _, t := range threads {
+		if t.CgroupID == id {
+			kept = append(kept, t)
+		}
+	}
+	return kept
 }
 
 func filterByComm(threads []offcpu.Thread, substring string) []offcpu.Thread {
