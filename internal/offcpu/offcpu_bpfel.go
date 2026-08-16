@@ -18,20 +18,31 @@ type offcpuStatSlot uint32
 const (
 	offcpuStatSlotSTAT_EVENTS_DROPPED offcpuStatSlot = 0
 	offcpuStatSlotSTAT_TARGETS_FULL   offcpuStatSlot = 1
-	offcpuStatSlotSTAT__MAX           offcpuStatSlot = 2
+	offcpuStatSlotSTAT_CGROUPS_FULL   offcpuStatSlot = 2
+	offcpuStatSlotSTAT__MAX           offcpuStatSlot = 3
 )
 
 type offcpuThread struct {
-	_           structs.HostLayout
-	FirstSeenNs uint64
-	SinceNs     uint64
-	OnCpuNs     uint64
-	RunqueueNs  uint64
-	BlockedNs   uint64
-	UnknownNs   uint64
-	State       uint32
-	Tid         uint32
-	Comm        [16]int8
+	_                  structs.HostLayout
+	FirstSeenNs        uint64
+	SinceNs            uint64
+	OnCpuNs            uint64
+	RunqueueNs         uint64
+	BlockedNs          uint64
+	ThrottledNs        uint64
+	UnknownNs          uint64
+	CgroupId           uint64
+	ThrottleSnapshotNs uint64
+	State              uint32
+	Tid                uint32
+	Comm               [16]int8
+}
+
+type offcpuThrottle struct {
+	_        structs.HostLayout
+	TotalNs  uint64
+	SinceNs  uint64
+	Episodes uint64
 }
 
 // Names of all BPF objects in the ELF.
@@ -41,14 +52,18 @@ const (
 	offcpuMapStats               = "stats"
 	offcpuMapTargets             = "targets"
 	offcpuMapThreads             = "threads"
+	offcpuMapThrottled           = "throttled"
 	offcpuProgOnSchedProcessExit = "on_sched_process_exit"
 	offcpuProgOnSchedProcessFork = "on_sched_process_fork"
 	offcpuProgOnSchedSwitch      = "on_sched_switch"
 	offcpuProgOnSchedWakeup      = "on_sched_wakeup"
 	offcpuProgOnSchedWakeupNew   = "on_sched_wakeup_new"
+	offcpuProgOnThrottleCfsRq    = "on_throttle_cfs_rq"
+	offcpuProgOnUnthrottleCfsRq  = "on_unthrottle_cfs_rq"
 	offcpuVarFilterTargets       = "filter_targets"
 	offcpuVarUnusedStatSlot      = "unused_stat_slot"
 	offcpuVarUnusedThread        = "unused_thread"
+	offcpuVarUnusedThrottle      = "unused_throttle"
 )
 
 // loadOffcpu returns the embedded CollectionSpec for offcpu.
@@ -98,15 +113,18 @@ type offcpuProgramSpecs struct {
 	OnSchedSwitch      *ebpf.ProgramSpec `ebpf:"on_sched_switch"`
 	OnSchedWakeup      *ebpf.ProgramSpec `ebpf:"on_sched_wakeup"`
 	OnSchedWakeupNew   *ebpf.ProgramSpec `ebpf:"on_sched_wakeup_new"`
+	OnThrottleCfsRq    *ebpf.ProgramSpec `ebpf:"on_throttle_cfs_rq"`
+	OnUnthrottleCfsRq  *ebpf.ProgramSpec `ebpf:"on_unthrottle_cfs_rq"`
 }
 
 // offcpuMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type offcpuMapSpecs struct {
-	Stats   *ebpf.MapSpec `ebpf:"stats"`
-	Targets *ebpf.MapSpec `ebpf:"targets"`
-	Threads *ebpf.MapSpec `ebpf:"threads"`
+	Stats     *ebpf.MapSpec `ebpf:"stats"`
+	Targets   *ebpf.MapSpec `ebpf:"targets"`
+	Threads   *ebpf.MapSpec `ebpf:"threads"`
+	Throttled *ebpf.MapSpec `ebpf:"throttled"`
 }
 
 // offcpuVariableSpecs contains global variables before they are loaded into the kernel.
@@ -116,6 +134,7 @@ type offcpuVariableSpecs struct {
 	FilterTargets  *ebpf.VariableSpec `ebpf:"filter_targets"`
 	UnusedStatSlot *ebpf.VariableSpec `ebpf:"unused_stat_slot"`
 	UnusedThread   *ebpf.VariableSpec `ebpf:"unused_thread"`
+	UnusedThrottle *ebpf.VariableSpec `ebpf:"unused_throttle"`
 }
 
 // offcpuObjects contains all objects after they have been loaded into the kernel.
@@ -138,9 +157,10 @@ func (o *offcpuObjects) Close() error {
 //
 // It can be passed to loadOffcpuObjects or ebpf.CollectionSpec.LoadAndAssign.
 type offcpuMaps struct {
-	Stats   *ebpf.Map `ebpf:"stats"`
-	Targets *ebpf.Map `ebpf:"targets"`
-	Threads *ebpf.Map `ebpf:"threads"`
+	Stats     *ebpf.Map `ebpf:"stats"`
+	Targets   *ebpf.Map `ebpf:"targets"`
+	Threads   *ebpf.Map `ebpf:"threads"`
+	Throttled *ebpf.Map `ebpf:"throttled"`
 }
 
 func (m *offcpuMaps) Close() error {
@@ -148,6 +168,7 @@ func (m *offcpuMaps) Close() error {
 		m.Stats,
 		m.Targets,
 		m.Threads,
+		m.Throttled,
 	)
 }
 
@@ -158,6 +179,7 @@ type offcpuVariables struct {
 	FilterTargets  *ebpf.Variable `ebpf:"filter_targets"`
 	UnusedStatSlot *ebpf.Variable `ebpf:"unused_stat_slot"`
 	UnusedThread   *ebpf.Variable `ebpf:"unused_thread"`
+	UnusedThrottle *ebpf.Variable `ebpf:"unused_throttle"`
 }
 
 // offcpuPrograms contains all programs after they have been loaded into the kernel.
@@ -169,6 +191,8 @@ type offcpuPrograms struct {
 	OnSchedSwitch      *ebpf.Program `ebpf:"on_sched_switch"`
 	OnSchedWakeup      *ebpf.Program `ebpf:"on_sched_wakeup"`
 	OnSchedWakeupNew   *ebpf.Program `ebpf:"on_sched_wakeup_new"`
+	OnThrottleCfsRq    *ebpf.Program `ebpf:"on_throttle_cfs_rq"`
+	OnUnthrottleCfsRq  *ebpf.Program `ebpf:"on_unthrottle_cfs_rq"`
 }
 
 func (p *offcpuPrograms) Close() error {
@@ -178,6 +202,8 @@ func (p *offcpuPrograms) Close() error {
 		p.OnSchedSwitch,
 		p.OnSchedWakeup,
 		p.OnSchedWakeupNew,
+		p.OnThrottleCfsRq,
+		p.OnUnthrottleCfsRq,
 	)
 }
 

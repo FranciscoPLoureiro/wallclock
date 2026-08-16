@@ -26,6 +26,10 @@
  * them as one number.
  */
 #include <linux/bpf.h>
+/* struct pt_regs for the kprobe macros. bpf_tracing.h uses the kernel field
+ * names when vmlinux.h is in play and the userspace ones otherwise, and on
+ * x86-64 both describe the same layout, so the offsets come out right. */
+#include <linux/ptrace.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_tracing.h>
@@ -50,6 +54,40 @@ struct task_struct {
 	int pid;
 	int tgid;
 	char comm[16];
+} __attribute__((preserve_access_index));
+
+/*
+ * The path from a throttled runqueue to the cgroup that owns it.
+ *
+ * Five structs, one field each, out of types that have hundreds between them.
+ * The alternative is vmlinux.h, which for this kernel is 3.2 MB and 158,000
+ * lines of generated header to reach five members -- and which would hide the
+ * one thing worth seeing here, which is that the walk is by name and the
+ * loader resolves every step of it against the kernel actually running.
+ *
+ * cfs_rq -> tg -> css.cgroup -> kn -> id is the same identity that
+ * bpf_get_current_cgroup_id returns, arrived at from the scheduler's side
+ * rather than from a task's, which is what lets a throttling event and a
+ * waiting thread be matched to each other.
+ */
+struct kernfs_node {
+	__u64 id;
+} __attribute__((preserve_access_index));
+
+struct cgroup {
+	struct kernfs_node *kn;
+} __attribute__((preserve_access_index));
+
+struct cgroup_subsys_state {
+	struct cgroup *cgroup;
+} __attribute__((preserve_access_index));
+
+struct task_group {
+	struct cgroup_subsys_state css;
+} __attribute__((preserve_access_index));
+
+struct cfs_rq {
+	struct task_group *tg;
 } __attribute__((preserve_access_index));
 
 /*
@@ -159,11 +197,31 @@ struct thread {
 	__u64 on_cpu_ns;
 	__u64 runqueue_ns;
 	__u64 blocked_ns;
+	/*
+	 * The half of runqueue delay that the cgroup's own quota caused.
+	 *
+	 * Both halves are a thread that is ready and not running, and from
+	 * outside they are the same thing. They are opposite problems: one says
+	 * the machine has no CPU to give, the other says the machine had CPU
+	 * and the cgroup was not allowed to use it. A bigger machine fixes the
+	 * first and does nothing for the second; one line of a compose file
+	 * fixes the second and nothing for the first. Reporting them as one
+	 * number is how a team buys hardware it did not need.
+	 */
+	__u64 throttled_ns;
 	/* Time credited to no named state. It should always be zero, and it is
 	 * accumulated rather than merely displayed so that the day a state is
 	 * added without a case in credit_elapsed, the report says so instead of
 	 * quietly losing the time. */
 	__u64 unknown_ns;
+	/*
+	 * The cgroup this thread was last seen in, and the cumulative throttled
+	 * time of that cgroup at the instant the thread joined the runqueue.
+	 * The difference between that snapshot and the same total when the
+	 * thread finally runs is exactly how much of its wait the quota caused.
+	 */
+	__u64 cgroup_id;
+	__u64 throttle_snapshot_ns;
 	__u32 state;
 	__u32 tid;
 	char comm[16];
@@ -196,6 +254,56 @@ struct {
 
 const volatile __u8 filter_targets = 0;
 
+/*
+ * How long each cgroup has spent throttled, as a running total plus whichever
+ * episode is open right now.
+ *
+ * A total rather than a list of intervals, because a total is enough: a
+ * thread that joins the runqueue records the total it sees, and when it
+ * finally runs, the difference is how much of its wait was quota. That works
+ * for an episode that spans the whole wait, one that starts in the middle,
+ * and any number that begin and end inside it -- none of which a "was it
+ * throttled when I looked" test gets right.
+ */
+struct throttle {
+	/* Completed episodes. */
+	__u64 total_ns;
+	/* When the open episode began, or zero if the cgroup is running. */
+	__u64 since_ns;
+	__u64 episodes;
+};
+
+#define MAX_TRACKED_CGROUPS 4096
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_TRACKED_CGROUPS);
+	__type(key, __u64); /* cgroup id, as bpf_get_current_cgroup_id returns it */
+	__type(value, struct throttle);
+} throttled SEC(".maps");
+
+const struct throttle *unused_throttle __attribute__((unused));
+
+/*
+ * The cumulative time a cgroup has spent throttled as of now.
+ *
+ * Only meaningful evaluated at the present instant -- there is no way to ask
+ * what this was a second ago, which is why threads take a snapshot when they
+ * start waiting rather than reconstructing it afterwards.
+ */
+static __always_inline __u64 throttled_upto_now(__u64 cgroup_id, __u64 now)
+{
+	if (!cgroup_id)
+		return 0;
+	struct throttle *th = bpf_map_lookup_elem(&throttled, &cgroup_id);
+	if (!th)
+		return 0;
+	__u64 total = th->total_ns;
+	if (th->since_ns && now > th->since_ns)
+		total += now - th->since_ns;
+	return total;
+}
+
 enum stat_slot {
 	/*
 	 * Scheduler events, not threads. When the threads map is full the
@@ -207,7 +315,8 @@ enum stat_slot {
 	 */
 	STAT_EVENTS_DROPPED = 0,
 	STAT_TARGETS_FULL = 1,
-	STAT__MAX = 2,
+	STAT_CGROUPS_FULL = 2,
+	STAT__MAX = 3,
 };
 
 const enum stat_slot *unused_stat_slot __attribute__((unused));
@@ -266,7 +375,10 @@ static __always_inline void start_fresh(struct thread *t, __u32 tid,
 	t->on_cpu_ns = 0;
 	t->runqueue_ns = 0;
 	t->blocked_ns = 0;
+	t->throttled_ns = 0;
 	t->unknown_ns = 0;
+	t->cgroup_id = 0;
+	t->throttle_snapshot_ns = 0;
 	t->state = state;
 	t->tid = tid;
 	if (comm)
@@ -280,9 +392,34 @@ static __always_inline void credit_elapsed(struct thread *t, __u64 now)
 	case STATE_ON_CPU:
 		t->on_cpu_ns += elapsed;
 		break;
-	case STATE_RUNQUEUE:
-		t->runqueue_ns += elapsed;
+	case STATE_RUNQUEUE: {
+		/*
+		 * The whole point of the phase, in six lines. The thread was
+		 * ready and not running; the question is whether nobody had a
+		 * CPU to give it, or whether its cgroup was not allowed to use
+		 * one that was free.
+		 *
+		 * The cgroup's cumulative throttled time has moved on by
+		 * exactly the amount of this wait that the quota caused, since
+		 * the snapshot was taken when the wait began.
+		 */
+		__u64 throttled_now = throttled_upto_now(t->cgroup_id, now);
+		__u64 quota = 0;
+		if (throttled_now > t->throttle_snapshot_ns)
+			quota = throttled_now - t->throttle_snapshot_ns;
+		/*
+		 * Clamped, and it should never bind. It would take the thread
+		 * changing cgroups mid-wait, or a snapshot that was never
+		 * taken -- and the alternative to clamping is a category that
+		 * exceeds the wall clock it is a share of, which would break
+		 * the decomposition rather than merely be wrong.
+		 */
+		if (quota > elapsed)
+			quota = elapsed;
+		t->throttled_ns += quota;
+		t->runqueue_ns += elapsed - quota;
 		break;
+	}
 	case STATE_BLOCKED:
 		t->blocked_ns += elapsed;
 		break;
@@ -335,7 +472,7 @@ enum arrival {
 };
 static __always_inline void transition(__u32 tid, const char *comm,
 				       enum thread_state next_state, __u64 now,
-				       enum arrival arrival)
+				       enum arrival arrival, __u64 cgroup_id)
 {
 	struct thread *t = bpf_map_lookup_elem(&threads, &tid);
 	if (!t) {
@@ -380,9 +517,28 @@ static __always_inline void transition(__u32 tid, const char *comm,
 	if (comm)
 		__builtin_memcpy(&t->comm, comm, sizeof(t->comm));
 
+	/*
+	 * Only some events can answer which cgroup a thread is in, so the
+	 * answer is kept when it arrives. bpf_get_current_cgroup_id speaks for
+	 * the running task, which at sched_switch is the one leaving -- so a
+	 * thread learns its own cgroup when it is scheduled out and not when
+	 * it is woken, where the running task is whoever did the waking. It is
+	 * sticky in practice: threads change cgroup about as often as they
+	 * change process.
+	 */
+	if (cgroup_id)
+		t->cgroup_id = cgroup_id;
+
 	credit_elapsed(t, now);
 	t->state = next_state;
 	t->since_ns = now;
+
+	/*
+	 * The clock on this wait starts here, and so does the reading it will
+	 * be compared against.
+	 */
+	if (next_state == STATE_RUNQUEUE)
+		t->throttle_snapshot_ns = throttled_upto_now(t->cgroup_id, now);
 }
 
 SEC("tracepoint/sched/sched_switch")
@@ -416,12 +572,12 @@ int on_sched_switch(struct sched_switch_ctx *ctx)
 		/* A switch-out: this is where a dying thread last switch
 		 * arrives, moments after its exit event. */
 		transition(prev, comm, runnable ? STATE_RUNQUEUE : STATE_BLOCKED,
-			   now, ARRIVAL_TAIL);
+			   now, ARRIVAL_TAIL, bpf_get_current_cgroup_id());
 	}
 
 	if (tracked(next)) {
 		__builtin_memcpy(comm, ctx->next_comm, sizeof(comm));
-		transition(next, comm, STATE_ON_CPU, now, ARRIVAL_LIVE);
+		transition(next, comm, STATE_ON_CPU, now, ARRIVAL_LIVE, 0);
 	}
 
 	return 0;
@@ -440,7 +596,7 @@ int on_sched_wakeup(struct sched_wakeup_ctx *ctx)
 		return 0;
 	char comm[16];
 	__builtin_memcpy(comm, ctx->comm, sizeof(comm));
-	transition(tid, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_LIVE);
+	transition(tid, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_LIVE, 0);
 	return 0;
 }
 
@@ -452,7 +608,7 @@ int on_sched_wakeup_new(struct sched_wakeup_ctx *ctx)
 		return 0;
 	char comm[16];
 	__builtin_memcpy(comm, ctx->comm, sizeof(comm));
-	transition(tid, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_NEW);
+	transition(tid, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_NEW, 0);
 	return 0;
 }
 
@@ -484,6 +640,62 @@ int BPF_PROG(on_sched_process_fork, struct task_struct *parent_task,
 	__u8 yes = 1;
 	if (bpf_map_update_elem(&targets, &child, &yes, BPF_ANY) < 0)
 		bump(STAT_TARGETS_FULL);
+	return 0;
+}
+
+/*
+ * The CFS bandwidth controller taking a cgroup off the CPU, and giving it
+ * back.
+ *
+ * These are kernel functions rather than tracepoints, so they are hooked with
+ * kprobes. fentry would be cheaper and is not worth it here: throttling fires
+ * a handful of times per 100 ms period, where sched_switch fires tens of
+ * thousands of times a second, so the saving is unmeasurable -- and both
+ * functions are static in the kernel BTF, which makes fentry the more
+ * fragile of the two for no return.
+ *
+ * A cgroup can be throttled on several CPUs, and this counts one episode per
+ * cgroup rather than per runqueue: a thread waiting for a CPU cares that its
+ * group was not allowed to run, not on how many cores that was true at once.
+ * The first throttle opens the window and a later one while it is open leaves
+ * it alone.
+ */
+SEC("kprobe/throttle_cfs_rq")
+int BPF_KPROBE(on_throttle_cfs_rq, struct cfs_rq *cfs_rq)
+{
+	__u64 cgroup_id = BPF_CORE_READ(cfs_rq, tg, css.cgroup, kn, id);
+	if (!cgroup_id)
+		return 0;
+
+	__u64 now = bpf_ktime_get_ns();
+	struct throttle *th = bpf_map_lookup_elem(&throttled, &cgroup_id);
+	if (!th) {
+		struct throttle opening = { .since_ns = now };
+		if (bpf_map_update_elem(&throttled, &cgroup_id, &opening, BPF_NOEXIST) < 0)
+			bump(STAT_CGROUPS_FULL);
+		return 0;
+	}
+	if (!th->since_ns)
+		th->since_ns = now;
+	return 0;
+}
+
+SEC("kprobe/unthrottle_cfs_rq")
+int BPF_KPROBE(on_unthrottle_cfs_rq, struct cfs_rq *cfs_rq)
+{
+	__u64 cgroup_id = BPF_CORE_READ(cfs_rq, tg, css.cgroup, kn, id);
+	if (!cgroup_id)
+		return 0;
+
+	struct throttle *th = bpf_map_lookup_elem(&throttled, &cgroup_id);
+	if (!th || !th->since_ns)
+		return 0;
+
+	__u64 now = bpf_ktime_get_ns();
+	if (now > th->since_ns)
+		th->total_ns += now - th->since_ns;
+	th->since_ns = 0;
+	th->episodes += 1;
 	return 0;
 }
 

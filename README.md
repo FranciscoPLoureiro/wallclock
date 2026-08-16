@@ -63,8 +63,38 @@ That is a correlation. This is the tool that turns it into an explanation.
 
 ## What works now
 
-Wall clock split into where it actually went. Forty-eight spinning threads on
-sixteen CPUs, so each one can have a third of a CPU and no more:
+Two identical spinning processes on an idle sixteen-core machine. One of them
+is in a cgroup with `cpu.max` set to 20 ms in every 100 ms; the other is not:
+
+```
+$ sudo wallclock profile -for 6s -comm wc- -top 4
+     tid  observed        on-cpu     runqueue    throttled  blocked  unknown  command
+  138977     5.95s    20.2% 1.2s  0.5% 28.6ms  79.3% 4.72s  0.0% 0s  0.0% 0s  wc-capped
+  138979     5.98s  100.0% 5.98s   0.0% 152µs      0.0% 0s  0.0% 0s  0.0% 0s  wc-free
+
+2 threads observed
+every decomposition sums to 100% of the time observed
+no threads lost
+```
+
+**That is the whole argument in one table.** Both threads never stop asking
+for CPU. One gets 20.2% of one — the quota it was given, measured, not
+assumed — and spends 79.3% of its life *ready and forbidden*. The other gets
+100%.
+
+An off-CPU profiler reports the capped thread as roughly 80% "not running"
+and offers no way to tell that from a machine with no CPUs to spare.
+`runqueue 0.5%` is the sentence that distinguishes them: **nothing was
+contended**. The fix is one line of a compose file, and a tool that reported a
+single not-running number would have sent somebody to buy hardware.
+
+The kernel's own tally for that cgroup over the same run: `nr_throttled 70`,
+`throttled_usec 5596241`. See [below](#throttling-measured-twice) for what
+that number is doing there.
+
+Wall clock split into where it actually went, without any cgroup involved.
+Forty-eight spinning threads on sixteen CPUs, so each one can have a third of
+a CPU and no more:
 
 ```
 $ sudo wallclock profile -for 8s -comm wc-load -top 5
@@ -231,6 +261,54 @@ nothing.
 
 The format is deliberate: context, the options actually considered, the
 decision, and what it costs.
+
+### Throttling, measured twice
+
+**Context.** Runqueue delay answers "this thread was ready and did not run"
+and stops there. Two opposite situations produce it: the machine had no CPU
+free, or the machine had CPU free and the thread's cgroup had spent its quota
+for the period. Buy a bigger machine; raise a limit. No existing tool
+separates them, which is the reason this project exists.
+
+**Decision.** Hook `throttle_cfs_rq` and `unthrottle_cfs_rq`, keep a running
+total of throttled time per cgroup, and have each thread record that total
+when it joins the runqueue. When it finally runs, the difference is exactly
+how much of its wait its own quota caused.
+
+A running total rather than a list of intervals, because a total is enough
+and is right in every case: an episode spanning the whole wait, one starting
+in the middle, and any number beginning and ending inside it. "Was the cgroup
+throttled when I looked" gets the last of those wrong.
+
+kprobes rather than fentry. fentry is cheaper and both functions are static in
+the kernel's BTF, which makes it the more fragile of the two — and throttling
+fires a handful of times per 100 ms period against tens of thousands of
+context switches a second, so the saving is unmeasurable.
+
+**The validation is the point.** These numbers come from kprobes on the
+scheduler; the kernel keeps its own tally in `cpu.stat`, by a route that
+shares no code with them. A thread spinning in a cgroup capped at 20%:
+
+| | |
+|---|---|
+| wallclock, for the thread | **1.607485793 s** throttled |
+| `cpu.stat`, for the cgroup | **1.607395 s** (`throttled_usec 1607395`) |
+
+Ninety-one microseconds apart in 1.6 seconds, and a ratio of 1.0001 over
+three consecutive runs. A test asserts it on every run, because the value of
+a second opinion is that it keeps being asked.
+
+**Consequences.** A thread's cgroup is learned from
+`bpf_get_current_cgroup_id`, which answers for the *running* task — so a
+thread learns its own cgroup when it is scheduled out, not when it is woken,
+where the running task is whoever did the waking. Until then its waits are
+filed as ordinary runqueue delay. In practice that is one scheduling round,
+and threads change cgroup about as often as they change process.
+
+The cgroup map is bounded like every other, and when it fills, that cgroup's
+throttling becomes invisible and its threads' waits go back to looking like
+contention — the two categories this whole section exists to separate,
+silently merged again. So it is counted and reported rather than absorbed.
 
 ### Blocked time and runqueue delay are different numbers
 

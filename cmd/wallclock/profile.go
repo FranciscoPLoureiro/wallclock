@@ -93,7 +93,7 @@ func runProfile(args []string) error {
 	})
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(w, "tid\tobserved\ton-cpu\trunqueue\tblocked\tunknown\t  command")
+	fmt.Fprintln(w, "tid\tobserved\ton-cpu\trunqueue\tthrottled\tblocked\tunknown\t  command")
 	exited := 0
 	for i, t := range threads {
 		if t.Exited {
@@ -110,11 +110,12 @@ func runProfile(args []string) error {
 		if t.Exited {
 			name += " (exited)"
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t  %s\n",
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t  %s\n",
 			t.TID,
 			round(t.Observed),
 			percentOf(t.OnCPU, t.Observed),
 			percentOf(t.Runqueue, t.Observed),
+			percentOf(t.Throttled, t.Observed),
 			percentOf(t.Blocked, t.Observed),
 			percentOf(t.Unknown, t.Observed),
 			name)
@@ -220,6 +221,12 @@ func reportProfileDrops(session *offcpu.Session) error {
 		fmt.Fprintf(os.Stdout,
 			"LOST %d newly created threads of the target: the target set is full\n",
 			drops.TargetsFull)
+	}
+	if drops.CgroupsFull > 0 {
+		fmt.Fprintf(os.Stdout,
+			"LOST the throttling of %d cgroups: that map is at max_entries, so their "+
+				"threads' waits are filed as ordinary runqueue delay -- the two "+
+				"categories this tool exists to separate, merged again\n", drops.CgroupsFull)
 	}
 	return nil
 }
