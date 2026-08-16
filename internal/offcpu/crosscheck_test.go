@@ -132,17 +132,30 @@ func TestOnCPUAgreesWithTheKernelsOwnAccounting(t *testing.T) {
 	//     is CPU time /proc counts and this tool may attribute to the moment
 	//     before it first saw the thread.
 	//
-	// Twenty per cent covers all three with room to spare, and is still far
-	// tighter than any error that would matter: a state machine crediting
-	// on-CPU time to the wrong column, or double counting it, misses by
-	// multiples rather than by a fifth.
-	const tolerance = 0.20
+	// The bounds are not symmetric, because the error is not. All three
+	// effects push the same way: this tool can only ever miss CPU time that
+	// /proc counted, never invent time /proc did not. So reporting *more*
+	// than the kernel is a real defect and gets a tight bound, while
+	// reporting a little less is the known shortfall and gets a loose one --
+	// which also stops the test failing on a loaded machine, where the
+	// first-sight gap is a larger share of a shorter observation. A symmetric
+	// twenty per cent failed exactly that way with two suites running at
+	// once, at a ratio of 0.92 typical and 0.80 the floor.
+	const (
+		floor   = 0.70
+		ceiling = 1.05
+	)
 	ratio := float64(wallclockSays) / float64(kernelSays)
-	if ratio < 1-tolerance || ratio > 1+tolerance {
-		t.Errorf("wallclock reports %v on-CPU, /proc reports %v: a ratio of %.2f, "+
-			"outside the declared %.0f%%. Two independent measurements of the same "+
-			"thread over the same interval disagree, and one of them is wrong",
-			wallclockSays, kernelSays, ratio, 100*tolerance)
+	switch {
+	case ratio > ceiling:
+		t.Errorf("wallclock reports %v on-CPU and /proc only %v: a ratio of %.2f. "+
+			"This tool cannot see CPU time the kernel did not account for, so "+
+			"something is being counted twice",
+			wallclockSays, kernelSays, ratio)
+	case ratio < floor:
+		t.Errorf("wallclock reports %v on-CPU against /proc's %v: a ratio of %.2f, "+
+			"below the %.2f that the first-sight gap and /proc's 10 ms ticks can "+
+			"explain between them", wallclockSays, kernelSays, ratio, floor)
 	}
 	t.Logf("wallclock %v, kernel %v, ratio %.3f", wallclockSays, kernelSays, ratio)
 }

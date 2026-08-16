@@ -26,6 +26,7 @@
  * them as one number.
  */
 #include <linux/bpf.h>
+#include <linux/errno.h>
 /* struct pt_regs for the kprobe macros. bpf_tracing.h uses the kernel field
  * names when vmlinux.h is in play and the userspace ones otherwise, and on
  * x86-64 both describe the same layout, so the offsets come out right. */
@@ -491,9 +492,21 @@ static __always_inline void credit_elapsed(struct thread *t, __u64 now)
 			__u64 *reason = bpf_map_lookup_elem(&blocked_by, &key);
 			if (reason) {
 				*reason += elapsed;
-			} else if (bpf_map_update_elem(&blocked_by, &key, &elapsed,
-						       BPF_NOEXIST) < 0) {
-				bump(STAT_STACKS_LOST);
+			} else {
+				long err = bpf_map_update_elem(&blocked_by, &key,
+							       &elapsed, BPF_NOEXIST);
+				if (err == -EEXIST) {
+					/* Another CPU filed the first interval
+					 * for this thread and stack between the
+					 * lookup and here. Add to what it
+					 * created rather than calling a lost
+					 * race a full map. */
+					reason = bpf_map_lookup_elem(&blocked_by, &key);
+					if (reason)
+						*reason += elapsed;
+				} else if (err) {
+					bump(STAT_STACKS_LOST);
+				}
 			}
 		}
 		break;
@@ -561,7 +574,14 @@ static __always_inline void transition(__u32 tid, const char *comm,
 		 */
 		struct thread fresh = {};
 		start_fresh(&fresh, tid, comm, next_state, now);
-		if (bpf_map_update_elem(&threads, &tid, &fresh, BPF_NOEXIST) < 0)
+		long err = bpf_map_update_elem(&threads, &tid, &fresh, BPF_NOEXIST);
+		/* -EEXIST means another CPU saw this thread first, which is a
+		 * race and not a full map. There is nothing to credit on a
+		 * first sight anyway, so the entry it created is already
+		 * correct. Counting it as capacity would have the report claim
+		 * the map is at max_entries on a machine where it is nearly
+		 * empty. */
+		if (err && err != -EEXIST)
 			bump(STAT_EVENTS_DROPPED);
 		return;
 	}
@@ -768,8 +788,18 @@ int BPF_KPROBE(on_throttle_cfs_rq, struct cfs_rq *cfs_rq)
 	struct throttle *th = bpf_map_lookup_elem(&throttled, &cgroup_id);
 	if (!th) {
 		struct throttle opening = { .since_ns = now };
-		if (bpf_map_update_elem(&throttled, &cgroup_id, &opening, BPF_NOEXIST) < 0)
+		long err = bpf_map_update_elem(&throttled, &cgroup_id, &opening,
+					       BPF_NOEXIST);
+		if (err == -EEXIST) {
+			/* A cgroup is throttled on several CPUs at once, so two
+			 * of them racing to open the window is the normal case,
+			 * not a capacity problem. */
+			th = bpf_map_lookup_elem(&throttled, &cgroup_id);
+			if (th && !th->since_ns)
+				th->since_ns = now;
+		} else if (err) {
 			bump(STAT_CGROUPS_FULL);
+		}
 		return 0;
 	}
 	if (!th->since_ns)
@@ -788,10 +818,21 @@ int BPF_KPROBE(on_unthrottle_cfs_rq, struct cfs_rq *cfs_rq)
 	if (!th || !th->since_ns)
 		return 0;
 
+	/*
+	 * The window is closed before its length is banked, and the order is
+	 * deliberate. A thread on another CPU reads total_ns and since_ns as
+	 * though they were one value; between the two writes it sees either the
+	 * episode counted twice, or not yet counted at all. The first inflates
+	 * the baseline a thread records when it joins the runqueue and makes
+	 * its throttled time come out too low -- silently, in the one number
+	 * this phase exists to produce. The second costs at most one episode
+	 * that the next read picks up.
+	 */
 	__u64 now = bpf_ktime_get_ns();
-	if (now > th->since_ns)
-		th->total_ns += now - th->since_ns;
+	__u64 opened = th->since_ns;
 	th->since_ns = 0;
+	if (now > opened)
+		th->total_ns += now - opened;
 	th->episodes += 1;
 	return 0;
 }
@@ -840,8 +881,22 @@ int BPF_PROG(on_sched_process_exit, struct task_struct *task)
 		 */
 		struct thread headstone = {};
 		start_fresh(&headstone, tid, comm, STATE_EXITED, now);
-		if (bpf_map_update_elem(&threads, &tid, &headstone, BPF_NOEXIST) < 0)
+		long err = bpf_map_update_elem(&threads, &tid, &headstone,
+					       BPF_NOEXIST);
+		if (err == -EEXIST) {
+			/* It came into existence between the lookup and here.
+			 * Mark that entry instead, or the switch that follows
+			 * this exit finds a live-looking thread and keeps it
+			 * alive forever. */
+			t = bpf_map_lookup_elem(&threads, &tid);
+			if (t) {
+				credit_elapsed(t, now);
+				t->state = STATE_EXITED;
+				t->since_ns = now;
+			}
+		} else if (err) {
 			bump(STAT_EVENTS_DROPPED);
+		}
 		return 0;
 	}
 

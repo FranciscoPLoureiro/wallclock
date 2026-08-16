@@ -28,6 +28,10 @@ import (
 
 //go:generate go tool bpf2go -target bpfel -type thread -type stat_slot -type blocked_key offcpu ../../bpf/offcpu.bpf.c -- -D__TARGET_ARCH_x86 -I/usr/include/x86_64-linux-gnu
 
+// noStack is the absence of a captured stack, matching the -1 the BPF program
+// stores. Zero is a stack id the kernel really returns.
+const noStack int32 = -1
+
 // State is what a thread was doing.
 type State uint32
 
@@ -90,7 +94,10 @@ type Thread struct {
 	// blocked for the whole window never ends one. Without them, the threads
 	// that spent the most time waiting -- exactly the ones worth looking
 	// at -- are the ones whose reason reads "unattributed".
-	OpenBlocked      time.Duration
+	OpenBlocked time.Duration
+	// OpenBlockedStack is negative when there is none. Zero is a stack id
+	// the kernel really returns, so it cannot double as the unset value --
+	// the kernel side uses -1 for the same reason.
 	OpenBlockedStack int32
 	// Unknown is time the thread spent in a state this tool could not name.
 	// It should be zero, and it is accumulated in the kernel rather than
@@ -230,12 +237,17 @@ func Open(targetPID int) (_ *Session, err error) {
 		{"sched_process_exit", s.objs.OnSchedProcessExit},
 		{"sched_process_fork", s.objs.OnSchedProcessFork},
 	} {
-		l, err := link.AttachRawTracepoint(link.RawTracepointOptions{
+		// Assigned to the named return, not declared with :=. The deferred
+		// cleanup above reads that variable, and a shadowed copy leaves it
+		// nil -- so a failure here would return an error and leak the
+		// programs, the maps and every link already attached.
+		l, attachErr := link.AttachRawTracepoint(link.RawTracepointOptions{
 			Name:    raw.name,
 			Program: raw.program,
 		})
-		if err != nil {
-			return nil, fmt.Errorf("attach to the raw %s tracepoint: %w", raw.name, err)
+		if attachErr != nil {
+			err = fmt.Errorf("attach to the raw %s tracepoint: %w", raw.name, attachErr)
+			return nil, err
 		}
 		s.links = append(s.links, l)
 	}
@@ -253,9 +265,10 @@ func Open(targetPID int) (_ *Session, err error) {
 		{"throttle_cfs_rq", s.objs.OnThrottleCfsRq},
 		{"unthrottle_cfs_rq", s.objs.OnUnthrottleCfsRq},
 	} {
-		l, err := link.Kprobe(probe.symbol, probe.program, nil)
-		if err != nil {
-			return nil, fmt.Errorf("attach a kprobe to %s: %w", probe.symbol, err)
+		l, attachErr := link.Kprobe(probe.symbol, probe.program, nil)
+		if attachErr != nil {
+			err = fmt.Errorf("attach a kprobe to %s: %w", probe.symbol, attachErr)
+			return nil, err
 		}
 		s.links = append(s.links, l)
 	}
@@ -268,9 +281,10 @@ func Open(targetPID int) (_ *Session, err error) {
 		{"sched_wakeup", s.objs.OnSchedWakeup},
 		{"sched_wakeup_new", s.objs.OnSchedWakeupNew},
 	} {
-		l, err := link.Tracepoint("sched", attachment.name, attachment.program, nil)
-		if err != nil {
-			return nil, fmt.Errorf("attach to sched:%s: %w", attachment.name, err)
+		l, attachErr := link.Tracepoint("sched", attachment.name, attachment.program, nil)
+		if attachErr != nil {
+			err = fmt.Errorf("attach to sched:%s: %w", attachment.name, attachErr)
+			return nil, err
 		}
 		s.links = append(s.links, l)
 	}
@@ -378,14 +392,15 @@ func (s *Session) Threads() ([]Thread, error) {
 			return nil, err
 		}
 		t := Thread{
-			TID:       raw.Tid,
-			Comm:      commToString(raw.Comm),
-			CgroupID:  raw.CgroupId,
-			OnCPU:     time.Duration(raw.OnCpuNs),     //nolint:gosec // ns since boot, signed after 292 years
-			Runqueue:  time.Duration(raw.RunqueueNs),  //nolint:gosec // as above
-			Throttled: time.Duration(raw.ThrottledNs), //nolint:gosec // as above
-			Blocked:   time.Duration(raw.BlockedNs),   //nolint:gosec // as above
-			Unknown:   time.Duration(raw.UnknownNs),   //nolint:gosec // as above
+			OpenBlockedStack: noStack,
+			TID:              raw.Tid,
+			Comm:             commToString(raw.Comm),
+			CgroupID:         raw.CgroupId,
+			OnCPU:            time.Duration(raw.OnCpuNs),     //nolint:gosec // ns since boot, signed after 292 years
+			Runqueue:         time.Duration(raw.RunqueueNs),  //nolint:gosec // as above
+			Throttled:        time.Duration(raw.ThrottledNs), //nolint:gosec // as above
+			Blocked:          time.Duration(raw.BlockedNs),   //nolint:gosec // as above
+			Unknown:          time.Duration(raw.UnknownNs),   //nolint:gosec // as above
 		}
 
 		if State(raw.State) == StateExited {

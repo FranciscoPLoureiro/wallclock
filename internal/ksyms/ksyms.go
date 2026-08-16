@@ -45,6 +45,15 @@ func Load() (*Table, error) {
 		if len(fields) < 3 {
 			continue
 		}
+		// Code only. kallsyms interleaves data symbols with text, and
+		// Resolve names an address after the nearest symbol before it -- so a
+		// frame that follows a variable would be reported as that variable.
+		// Worse than a wrong label: Classify matches substrings, so a data
+		// symbol containing "tcp_" or "futex" would misclassify the whole
+		// wait it was standing in for.
+		if !isTextSymbol(fields[1]) {
+			continue
+		}
 		addr, err := strconv.ParseUint(fields[0], 16, 64)
 		if err != nil {
 			continue
@@ -70,6 +79,18 @@ func Load() (*Table, error) {
 				"kernel pointers are restricted -- run as root")
 	}
 	return t, nil
+}
+
+// isTextSymbol reports whether a kallsyms type letter marks executable code.
+// t and T are text, w and W are weak text; everything else is data of some
+// kind and cannot contain a return address.
+func isTextSymbol(kind string) bool {
+	switch kind {
+	case "t", "T", "w", "W":
+		return true
+	default:
+		return false
+	}
 }
 
 func (t *Table) Len() int           { return len(t.addrs) }
