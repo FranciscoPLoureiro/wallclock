@@ -13,13 +13,20 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type offcpuBlockedKey struct {
+	_       structs.HostLayout
+	Tid     uint32
+	StackId int32
+}
+
 type offcpuStatSlot uint32
 
 const (
 	offcpuStatSlotSTAT_EVENTS_DROPPED offcpuStatSlot = 0
 	offcpuStatSlotSTAT_TARGETS_FULL   offcpuStatSlot = 1
 	offcpuStatSlotSTAT_CGROUPS_FULL   offcpuStatSlot = 2
-	offcpuStatSlotSTAT__MAX           offcpuStatSlot = 3
+	offcpuStatSlotSTAT_STACKS_LOST    offcpuStatSlot = 3
+	offcpuStatSlotSTAT__MAX           offcpuStatSlot = 4
 )
 
 type offcpuThread struct {
@@ -33,9 +40,11 @@ type offcpuThread struct {
 	UnknownNs          uint64
 	CgroupId           uint64
 	ThrottleSnapshotNs uint64
+	BlockStackId       int32
 	State              uint32
 	Tid                uint32
 	Comm               [16]int8
+	_                  [4]byte
 }
 
 type offcpuThrottle struct {
@@ -49,6 +58,8 @@ type offcpuThrottle struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	offcpuMapBlockedBy           = "blocked_by"
+	offcpuMapStacks              = "stacks"
 	offcpuMapStats               = "stats"
 	offcpuMapTargets             = "targets"
 	offcpuMapThreads             = "threads"
@@ -61,6 +72,7 @@ const (
 	offcpuProgOnThrottleCfsRq    = "on_throttle_cfs_rq"
 	offcpuProgOnUnthrottleCfsRq  = "on_unthrottle_cfs_rq"
 	offcpuVarFilterTargets       = "filter_targets"
+	offcpuVarUnusedBlockedKey    = "unused_blocked_key"
 	offcpuVarUnusedStatSlot      = "unused_stat_slot"
 	offcpuVarUnusedThread        = "unused_thread"
 	offcpuVarUnusedThrottle      = "unused_throttle"
@@ -121,6 +133,8 @@ type offcpuProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type offcpuMapSpecs struct {
+	BlockedBy *ebpf.MapSpec `ebpf:"blocked_by"`
+	Stacks    *ebpf.MapSpec `ebpf:"stacks"`
 	Stats     *ebpf.MapSpec `ebpf:"stats"`
 	Targets   *ebpf.MapSpec `ebpf:"targets"`
 	Threads   *ebpf.MapSpec `ebpf:"threads"`
@@ -131,10 +145,11 @@ type offcpuMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type offcpuVariableSpecs struct {
-	FilterTargets  *ebpf.VariableSpec `ebpf:"filter_targets"`
-	UnusedStatSlot *ebpf.VariableSpec `ebpf:"unused_stat_slot"`
-	UnusedThread   *ebpf.VariableSpec `ebpf:"unused_thread"`
-	UnusedThrottle *ebpf.VariableSpec `ebpf:"unused_throttle"`
+	FilterTargets    *ebpf.VariableSpec `ebpf:"filter_targets"`
+	UnusedBlockedKey *ebpf.VariableSpec `ebpf:"unused_blocked_key"`
+	UnusedStatSlot   *ebpf.VariableSpec `ebpf:"unused_stat_slot"`
+	UnusedThread     *ebpf.VariableSpec `ebpf:"unused_thread"`
+	UnusedThrottle   *ebpf.VariableSpec `ebpf:"unused_throttle"`
 }
 
 // offcpuObjects contains all objects after they have been loaded into the kernel.
@@ -157,6 +172,8 @@ func (o *offcpuObjects) Close() error {
 //
 // It can be passed to loadOffcpuObjects or ebpf.CollectionSpec.LoadAndAssign.
 type offcpuMaps struct {
+	BlockedBy *ebpf.Map `ebpf:"blocked_by"`
+	Stacks    *ebpf.Map `ebpf:"stacks"`
 	Stats     *ebpf.Map `ebpf:"stats"`
 	Targets   *ebpf.Map `ebpf:"targets"`
 	Threads   *ebpf.Map `ebpf:"threads"`
@@ -165,6 +182,8 @@ type offcpuMaps struct {
 
 func (m *offcpuMaps) Close() error {
 	return _OffcpuClose(
+		m.BlockedBy,
+		m.Stacks,
 		m.Stats,
 		m.Targets,
 		m.Threads,
@@ -176,10 +195,11 @@ func (m *offcpuMaps) Close() error {
 //
 // It can be passed to loadOffcpuObjects or ebpf.CollectionSpec.LoadAndAssign.
 type offcpuVariables struct {
-	FilterTargets  *ebpf.Variable `ebpf:"filter_targets"`
-	UnusedStatSlot *ebpf.Variable `ebpf:"unused_stat_slot"`
-	UnusedThread   *ebpf.Variable `ebpf:"unused_thread"`
-	UnusedThrottle *ebpf.Variable `ebpf:"unused_throttle"`
+	FilterTargets    *ebpf.Variable `ebpf:"filter_targets"`
+	UnusedBlockedKey *ebpf.Variable `ebpf:"unused_blocked_key"`
+	UnusedStatSlot   *ebpf.Variable `ebpf:"unused_stat_slot"`
+	UnusedThread     *ebpf.Variable `ebpf:"unused_thread"`
+	UnusedThrottle   *ebpf.Variable `ebpf:"unused_throttle"`
 }
 
 // offcpuPrograms contains all programs after they have been loaded into the kernel.

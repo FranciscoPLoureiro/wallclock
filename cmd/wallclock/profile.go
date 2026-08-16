@@ -9,6 +9,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/FranciscoPLoureiro/wallclock/internal/ksyms"
 	"github.com/FranciscoPLoureiro/wallclock/internal/offcpu"
 )
 
@@ -22,16 +23,20 @@ flags:
   -for DURATION   how long to observe (default 10s)
   -top N          how many threads to show, busiest first (default 15)
   -comm SUBSTRING only threads whose name contains this
+  -reasons        break blocked time down by what was being waited for
+  -folded FILE    write off-CPU folded stacks for flamegraph.pl
 `
 
 func runProfile(args []string) error {
 	fs := flag.NewFlagSet("profile", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, profileUsage) }
 	var (
-		pid    = fs.Int("pid", 0, "")
-		window = fs.Duration("for", 10*time.Second, "")
-		top    = fs.Int("top", 15, "")
-		comm   = fs.String("comm", "", "")
+		pid     = fs.Int("pid", 0, "")
+		window  = fs.Duration("for", 10*time.Second, "")
+		top     = fs.Int("top", 15, "")
+		comm    = fs.String("comm", "", "")
+		reasons = fs.Bool("reasons", false, "")
+		folded  = fs.String("folded", "", "")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -60,6 +65,20 @@ func runProfile(args []string) error {
 	threads, err := session.Threads()
 	if err != nil {
 		return err
+	}
+
+	// Reasons after the thread totals, and read against them: the open wait
+	// each thread is still in needs its duration, and the rows belonging to
+	// threads that have gone need dropping.
+	var blocked []offcpu.Blocked
+	if *reasons || *folded != "" {
+		symbols, err := ksyms.Load()
+		if err != nil {
+			return fmt.Errorf("naming kernel stacks: %w", err)
+		}
+		if blocked, err = session.BlockedReasons(symbols, threads); err != nil {
+			return err
+		}
 	}
 	// The two empty cases are reported separately. "Nothing matched your
 	// filter" and "the tool saw nothing at all" look identical in a report
@@ -119,9 +138,30 @@ func runProfile(args []string) error {
 			percentOf(t.Blocked, t.Observed),
 			percentOf(t.Unknown, t.Observed),
 			name)
+		if *reasons {
+			// Flushed per thread so the breakdown lands under its own row:
+			// tabwriter buffers until it can align a block, and the reason
+			// lines are not part of that block.
+			if err := w.Flush(); err != nil {
+				return err
+			}
+			writeReasons(os.Stdout, blocked, t)
+		}
 	}
 	if err := w.Flush(); err != nil {
 		return err
+	}
+
+	if *folded != "" {
+		file, err := os.Create(*folded)
+		if err != nil {
+			return fmt.Errorf("creating the folded stack file: %w", err)
+		}
+		defer file.Close()
+		if err := writeFolded(file, blocked, threads); err != nil {
+			return fmt.Errorf("writing folded stacks: %w", err)
+		}
+		fmt.Fprintf(os.Stdout, "\nfolded off-CPU stacks written to %s\n", *folded)
 	}
 
 	fmt.Fprintf(os.Stdout, "\n%d threads observed", len(threads))

@@ -26,7 +26,7 @@ import (
 	"github.com/FranciscoPLoureiro/wallclock/internal/pidns"
 )
 
-//go:generate go tool bpf2go -target bpfel -type thread -type stat_slot offcpu ../../bpf/offcpu.bpf.c -- -D__TARGET_ARCH_x86 -I/usr/include/x86_64-linux-gnu
+//go:generate go tool bpf2go -target bpfel -type thread -type stat_slot -type blocked_key offcpu ../../bpf/offcpu.bpf.c -- -D__TARGET_ARCH_x86 -I/usr/include/x86_64-linux-gnu
 
 // State is what a thread was doing.
 type State uint32
@@ -81,6 +81,17 @@ type Thread struct {
 	// numbers it, or zero if it has not been observed leaving a CPU yet.
 	// Unlike a pid this means the same thing inside a container and out.
 	CgroupID uint64
+
+	// OpenBlocked is the part of Blocked that has not ended yet: the thread
+	// is still waiting as this is read. OpenBlockedStack is the stack it is
+	// waiting on, or negative if none was captured.
+	//
+	// These exist because a reason is filed when a wait *ends*, and a thread
+	// blocked for the whole window never ends one. Without them, the threads
+	// that spent the most time waiting -- exactly the ones worth looking
+	// at -- are the ones whose reason reads "unattributed".
+	OpenBlocked      time.Duration
+	OpenBlockedStack int32
 	// Unknown is time the thread spent in a state this tool could not name.
 	// It should be zero, and it is accumulated in the kernel rather than
 	// merely displayed, so that it can actually become non-zero: a state
@@ -131,11 +142,18 @@ type Drops struct {
 	// exists to separate, silently merged again -- so it is reported rather
 	// than absorbed.
 	CgroupsFull uint64
+	// StacksLost counts blocked intervals whose reason could not be
+	// recorded, because the stack could not be captured or its total could
+	// not be stored. That time still appears in the thread total; what is
+	// missing is what it was waiting for, and the report says so rather than
+	// filing it under "other" as though that were an answer.
+	StacksLost uint64
 }
 
 // Any reports whether anything was lost.
 func (d Drops) Any() bool {
-	return d.EventsDropped > 0 || d.TargetsFull > 0 || d.CgroupsFull > 0
+	return d.EventsDropped > 0 || d.TargetsFull > 0 ||
+		d.CgroupsFull > 0 || d.StacksLost > 0
 }
 
 // Session owns the loaded programs, their maps and the attachments.
@@ -399,6 +417,8 @@ func (s *Session) Threads() ([]Thread, error) {
 				t.Runqueue += current
 			case StateBlocked:
 				t.Blocked += current
+				t.OpenBlocked = current
+				t.OpenBlockedStack = raw.BlockStackId
 			case StateUnknown, StateExited:
 				t.Unknown += current
 			}
@@ -430,6 +450,7 @@ func (s *Session) Drops() (Drops, error) {
 		{offcpuStatSlotSTAT_EVENTS_DROPPED, &d.EventsDropped},
 		{offcpuStatSlotSTAT_TARGETS_FULL, &d.TargetsFull},
 		{offcpuStatSlotSTAT_CGROUPS_FULL, &d.CgroupsFull},
+		{offcpuStatSlotSTAT_STACKS_LOST, &d.StacksLost},
 	} {
 		if err := s.objs.Stats.Lookup(uint32(slot.index), slot.into); err != nil {
 			return Drops{}, fmt.Errorf("read drop counter %d: %w", slot.index, err)

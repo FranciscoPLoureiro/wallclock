@@ -222,6 +222,9 @@ struct thread {
 	 */
 	__u64 cgroup_id;
 	__u64 throttle_snapshot_ns;
+	/* The kernel stack the thread stopped on, or negative if it could not
+	 * be captured. Valid only while the thread is blocked. */
+	__s32 block_stack_id;
 	__u32 state;
 	__u32 tid;
 	char comm[16];
@@ -285,6 +288,52 @@ struct {
 const struct throttle *unused_throttle __attribute__((unused));
 
 /*
+ * Why a thread stopped, taken from the kernel stack at the moment it stopped.
+ *
+ * The function on top says everything: tcp_recvmsg is a socket, futex_wait is
+ * a lock, io_schedule is a disk, do_nanosleep is a deliberate pause. Those are
+ * one event to the scheduler and four different problems to whoever has to
+ * fix one of them.
+ *
+ * The stack is captured here and classified in userspace, because BPF cannot
+ * turn an address into a symbol -- and because the addresses are wanted whole
+ * in any case, to fold into a flame graph.
+ */
+#define MAX_STACK_DEPTH 32
+#define MAX_STACKS 8192
+
+struct {
+	__uint(type, BPF_MAP_TYPE_STACK_TRACE);
+	__uint(max_entries, MAX_STACKS);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, MAX_STACK_DEPTH * sizeof(__u64));
+} stacks SEC(".maps");
+
+/*
+ * Blocked time, split by the stack that caused it.
+ *
+ * Keyed by thread as well as by stack, so that the same wait -- every thread
+ * in a pool parked on one futex -- can still be told apart by who was doing
+ * the waiting. These totals add up to the thread's blocked_ns, and userspace
+ * checks that they do rather than trusting that they must.
+ */
+struct blocked_key {
+	__u32 tid;
+	__s32 stack_id;
+};
+
+#define MAX_BLOCKED_REASONS 32768
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_BLOCKED_REASONS);
+	__type(key, struct blocked_key);
+	__type(value, __u64);
+} blocked_by SEC(".maps");
+
+const struct blocked_key *unused_blocked_key __attribute__((unused));
+
+/*
  * The cumulative time a cgroup has spent throttled as of now.
  *
  * Only meaningful evaluated at the present instant -- there is no way to ask
@@ -316,7 +365,11 @@ enum stat_slot {
 	STAT_EVENTS_DROPPED = 0,
 	STAT_TARGETS_FULL = 1,
 	STAT_CGROUPS_FULL = 2,
-	STAT__MAX = 3,
+	/* A stack could not be captured or its total could not be recorded, so
+	 * that blocked time has no reason attached to it and lands in the
+	 * unattributed line of the report rather than vanishing. */
+	STAT_STACKS_LOST = 3,
+	STAT__MAX = 4,
 };
 
 const enum stat_slot *unused_stat_slot __attribute__((unused));
@@ -379,6 +432,7 @@ static __always_inline void start_fresh(struct thread *t, __u32 tid,
 	t->unknown_ns = 0;
 	t->cgroup_id = 0;
 	t->throttle_snapshot_ns = 0;
+	t->block_stack_id = -1;
 	t->state = state;
 	t->tid = tid;
 	if (comm)
@@ -422,6 +476,26 @@ static __always_inline void credit_elapsed(struct thread *t, __u64 now)
 	}
 	case STATE_BLOCKED:
 		t->blocked_ns += elapsed;
+		/*
+		 * The same interval, filed a second time against the stack the
+		 * thread stopped on, so that "blocked" can become "blocked in
+		 * tcp_recvmsg". The two totals are redundant on purpose:
+		 * userspace adds these up per thread and checks the sum against
+		 * blocked_ns, and a disagreement means reasons are being lost.
+		 */
+		if (t->block_stack_id >= 0) {
+			struct blocked_key key = {
+				.tid = t->tid,
+				.stack_id = t->block_stack_id,
+			};
+			__u64 *reason = bpf_map_lookup_elem(&blocked_by, &key);
+			if (reason) {
+				*reason += elapsed;
+			} else if (bpf_map_update_elem(&blocked_by, &key, &elapsed,
+						       BPF_NOEXIST) < 0) {
+				bump(STAT_STACKS_LOST);
+			}
+		}
 		break;
 	case STATE_EXITED:
 		/* Frozen at the moment of exit. */
@@ -472,7 +546,8 @@ enum arrival {
 };
 static __always_inline void transition(__u32 tid, const char *comm,
 				       enum thread_state next_state, __u64 now,
-				       enum arrival arrival, __u64 cgroup_id)
+				       enum arrival arrival, __u64 cgroup_id,
+				       __s32 stack_id)
 {
 	struct thread *t = bpf_map_lookup_elem(&threads, &tid);
 	if (!t) {
@@ -532,6 +607,11 @@ static __always_inline void transition(__u32 tid, const char *comm,
 	credit_elapsed(t, now);
 	t->state = next_state;
 	t->since_ns = now;
+	/*
+	 * Recorded after crediting, so the interval that just ended is filed
+	 * against the stack it began on rather than the one starting now.
+	 */
+	t->block_stack_id = next_state == STATE_BLOCKED ? stack_id : -1;
 
 	/*
 	 * The clock on this wait starts here, and so does the reading it will
@@ -558,6 +638,7 @@ int on_sched_switch(struct sched_switch_ctx *ctx)
 	 * account for, and costs 16 bytes of the 512 available.
 	 */
 	char comm[16];
+	__s32 stack_id = -1;
 
 	if (tracked(prev)) {
 		/*
@@ -569,15 +650,31 @@ int on_sched_switch(struct sched_switch_ctx *ctx)
 		int runnable = ctx->prev_state == TASK_RUNNING ||
 			       (ctx->prev_state & TASK_REPORT_MAX);
 		__builtin_memcpy(comm, ctx->prev_comm, sizeof(comm));
+
+		/*
+		 * The stack is taken here and nowhere else, because here is the
+		 * only moment it says anything: the thread is still on the CPU
+		 * it is leaving, and the frames underneath it are the call that
+		 * decided to stop. One instant later they are gone.
+		 *
+		 * Only for a thread that is actually stopping. A preempted
+		 * thread's stack describes whatever it was in the middle of,
+		 * which is not a reason for anything.
+		 */
+		if (!runnable) {
+			stack_id = bpf_get_stackid(ctx, &stacks, 0);
+			if (stack_id < 0)
+				bump(STAT_STACKS_LOST);
+		}
 		/* A switch-out: this is where a dying thread last switch
 		 * arrives, moments after its exit event. */
 		transition(prev, comm, runnable ? STATE_RUNQUEUE : STATE_BLOCKED,
-			   now, ARRIVAL_TAIL, bpf_get_current_cgroup_id());
+			   now, ARRIVAL_TAIL, bpf_get_current_cgroup_id(), stack_id);
 	}
 
 	if (tracked(next)) {
 		__builtin_memcpy(comm, ctx->next_comm, sizeof(comm));
-		transition(next, comm, STATE_ON_CPU, now, ARRIVAL_LIVE, 0);
+		transition(next, comm, STATE_ON_CPU, now, ARRIVAL_LIVE, 0, -1);
 	}
 
 	return 0;
@@ -596,7 +693,7 @@ int on_sched_wakeup(struct sched_wakeup_ctx *ctx)
 		return 0;
 	char comm[16];
 	__builtin_memcpy(comm, ctx->comm, sizeof(comm));
-	transition(tid, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_LIVE, 0);
+	transition(tid, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_LIVE, 0, -1);
 	return 0;
 }
 
@@ -608,7 +705,7 @@ int on_sched_wakeup_new(struct sched_wakeup_ctx *ctx)
 		return 0;
 	char comm[16];
 	__builtin_memcpy(comm, ctx->comm, sizeof(comm));
-	transition(tid, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_NEW, 0);
+	transition(tid, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_NEW, 0, -1);
 	return 0;
 }
 
