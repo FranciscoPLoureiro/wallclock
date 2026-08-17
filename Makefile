@@ -154,6 +154,17 @@ validate: build ## Measure the tool against answers known in advance (needs root
 	# a README by hand is a claim about a run nobody can repeat.
 	$(SUDO) $(BIN) validate
 
+OVERHEAD_WINDOW  ?= 2s
+OVERHEAD_REPEATS ?= 5
+
+.PHONY: overhead
+overhead: build ## Measure what the tool costs against event rate (needs root)
+	# Takes a few minutes: eight rates, three runs each, repeated. Two of
+	# those three runs are unprofiled -- one is the baseline and one is the
+	# control that says how much two identical runs differ, which is the
+	# resolution of the whole exercise.
+	$(SUDO) $(BIN) overhead -for $(OVERHEAD_WINDOW) -repeats $(OVERHEAD_REPEATS)
+
 .PHONY: flamegraph
 flamegraph: build ## Record off-CPU stacks and render a flame graph (needs root)
 	# An off-CPU flame graph, not the usual kind: the width of a frame is not
