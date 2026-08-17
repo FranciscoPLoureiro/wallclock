@@ -22,7 +22,7 @@ FIXTURE_OBJ := $(FIXTURE_SRC:.bpf.c=.bpf.o)
 # Test packages that need a real kernel. They are run from their own
 # directories by `make smoke`, so relative paths inside them mean the same
 # thing as they do under `go test`.
-KERNEL_TEST_DIRS := internal/bpfload internal/syscount internal/offcpu
+KERNEL_TEST_DIRS := internal/bpfload internal/syscount internal/offcpu internal/netlat
 
 # -target bpf makes clang emit BPF rather than host instructions.
 #

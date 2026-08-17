@@ -54,7 +54,7 @@ of them produce.
 | 1 | First program end to end: map aggregation and a ring buffer path | ✅ done |
 | 2 | Off-CPU, runqueue delay, and cgroup throttling separated | ✅ done |
 | 3 | What the Go runtime makes invisible from the kernel's side | ✅ done |
-| 4 | Network time attributed to individual destinations | planned — [phase 3 changed what it should be](#and-what-this-decided-about-phase-4) |
+| 4 | Network time attributed to individual destinations | ✅ done — [in the shape phase 3 forced on it](#and-what-this-decided-about-phase-4) |
 | 5 | Validation against injected latency, and measured overhead | ✅ done |
 | 6 | Point it at a real service and answer a real question | planned |
 
@@ -156,6 +156,62 @@ It is the single most important thing this tool has to say about Go, it is
 [measured against a control](#the-go-execution-model-and-what-it-hides-from-the-kernel)
 rather than asserted, and it is why the report says so in prose underneath the
 table instead of leaving a reader to conclude that the network is fast.
+
+And who the waiting was for. This is the same Go service as above — the one
+whose network waiting does not appear as blocked time anywhere — being timed
+against its dependency anyway:
+
+```
+$ sudo wallclock destinations -for 8s
+watching every connection for 8s
+
+      destination  exchanges    mean     p50     p99     max  name
+  127.0.0.1:34677       1528  41.2ms  49.2ms  49.2ms  65.8ms
+
+1 destinations. p50 and p99 are bucket ceilings, not interpolations
+1539 answers arrived with no outstanding request on their connection. That is
+normal for the receiving end of anything: a server reading a request has sent
+nothing yet.
+nothing lost
+```
+
+**41.2 ms measured against 40 ms injected, and no thread blocked for any of
+it.** The server holds every request for exactly 40 ms; the client is ordinary
+`net/http`, so its goroutines park in the netpoller and phase 2 sees nothing.
+The interval is timed from the send to the first bytes back, which is a
+property of the conversation rather than of the scheduler — see
+[what phase 3 decided about this](#and-what-this-decided-about-phase-4).
+
+The same question against real software. The ticket office API taking 142 181
+requests in forty seconds — 3 554 a second, one hundred tickets sold — with
+its three dependencies named from a file:
+
+```
+$ sudo wallclock destinations -for 40s -names ticketoffice.names \
+    -cgroup /sys/fs/cgroup/docker/b1bf39c308a3...
+
+      destination  exchanges   mean    p50     p99     max  name
+  172.18.0.2:5432        440  3.2ms  768µs  28.7ms  54.3ms  postgres
+   127.0.0.1:8080          8  3.1ms  3.1ms   5.1ms     5ms
+  172.18.0.4:5672        116  1.5ms  1.5ms   2.6ms   2.6ms  rabbitmq
+  172.18.0.3:6379     217427  1.1ms    1ms   3.6ms  81.4ms  redis
+
+4 destinations. p50 and p99 are bucket ceilings, not interpolations
+nothing lost
+```
+
+**That is the sentence phase 4 exists to produce.** Redis is the hot path —
+217 427 round trips, about one and a half per HTTP request, at 1.1 ms each.
+PostgreSQL is touched four hundred times and is both the slowest by mean and
+by far the worst at the tail: 28.7 ms at p99 against Redis's 3.6 ms. RabbitMQ
+is quiet. The row at `127.0.0.1:8080` is the container's health check probing
+itself, which is worth leaving in as a reminder that the tool reports what is
+there rather than what was expected.
+
+None of this appears as blocked time anywhere in the decomposition above,
+because the API is a Go service and its goroutines wait in a place where no
+thread stops. That is the whole reason this measurement is shaped the way it
+is.
 
 Syscall entries per process, counted inside the kernel, filtered inside the
 kernel, with what was thrown away reported rather than assumed:
@@ -700,6 +756,33 @@ That reframing is not a rescue of a phase that failed. It is the phase before
 it doing its job: phase 3 was placed ahead of phase 4 precisely so that a week
 would not be spent building the wrong thing, and it was.
 
+**And building it corrected the reframing twice more.** Both corrections came
+from measurements rather than from thinking harder, and both are the same
+lesson arriving in new places.
+
+*Per thread was still wrong.* The sentence above says "per thread", because
+the specification did, and it is not: a goroutine sends on whichever thread it
+is running on, parks in the netpoller, and is resumed on whichever thread is
+free. Keyed by thread, the answer finds no question — of twenty exchanges
+against a known server, six paired. Keyed by the *connection*, all twenty do,
+because a socket does not move between threads even when the goroutine using
+it does. Phase 3's finding, arriving somewhere nobody was looking for it.
+
+*A destination is somebody you call.* Pointed at the ticket office API the
+first working version reported fifty-four destinations, of which fifty were
+the load generator's ephemeral ports, each with more exchanges than PostgreSQL
+and Redis had between them. The interval measured against a caller is real —
+it is the time from answering one request to receiving the next — but that is
+the *client's* think time, and it is not what the word promises. Connections
+this process accepted are now marked at `inet_csk_accept` and left out, which
+is why the table [above](#what-works-now) has four rows and not fifty-four.
+
+That last one carries a limit worth stating rather than burying: a connection
+accepted *before* profiling starts is not marked, so a server that already has
+clients still shows them. The way to get a clean answer is to attach first and
+start the traffic afterwards, which is how the measurement above was taken —
+on the second attempt.
+
 ### How this was validated, and what it costs
 
 **Context.** A measuring tool that has not been measured is an opinion. Every
@@ -1082,6 +1165,61 @@ macros rather than plain C dereferences; a plain one compiles, loads, and
 reads the wrong bytes, which is the failure mode this decision exists to
 prevent and the reason it is written down before the first such access is
 written.
+
+#### The case that makes it concrete: reading a socket's far end
+
+Phase 4 needs two fields of `struct sock` — the peer's address and port — and
+they are the sharpest example of why the offsets cannot be compiled in. This
+is the entire declaration:
+
+```c
+struct sock_common {
+	__be32 skc_daddr;
+	__be16 skc_dport;
+} __attribute__((preserve_access_index));
+
+struct sock {
+	struct sock_common __sk_common;
+} __attribute__((preserve_access_index));
+```
+
+In the real kernel neither field sits where that says it does. `struct sock`
+has over a hundred members and `sock_common` around forty, and both of these
+live inside *anonymous unions*, beside aliases that let the kernel compare an
+address and a port in a single 64-bit load:
+
+```c
+union {
+	__addrpair skc_addrpair;
+	struct { __be32 skc_daddr; __be32 skc_rcv_saddr; };
+};
+```
+
+Their byte offsets move with the kernel version and with build configuration —
+`CONFIG_NET_NS`, `CONFIG_XFRM` and others each add or remove members ahead of
+them. Nothing warns when that happens. A program compiled against the wrong
+offset does not crash; it reads whatever is there and reports a plausible IPv4
+address belonging to nobody, in a table full of addresses.
+
+What the relocation does is replace the question. `preserve_access_index` makes
+clang record *"the field named `skc_daddr` inside `struct sock_common`"* rather
+than a number, and at load time libbpf looks that name up in the BTF the
+running kernel publishes about itself and patches in whatever offset that
+kernel actually uses. The binary works on a kernel it has never seen because it
+was never told an offset in the first place.
+
+Two consequences worth stating. The fields left out of the declaration cannot
+be got wrong, since matching is by name and nothing else is looked up — which
+is why declaring two members of a struct with a hundred is not a shortcut. And
+the anonymous unions do not need declaring at all, because BTF flattens
+anonymous members into their parent, so `skc_daddr` is found as a member of
+`sock_common` exactly as written.
+
+The failure mode this replaces is not theoretical for this project: phase 2
+lost a day to a *tracepoint* whose field offsets shifted between 6.6 and 6.17,
+and the kernel refused the attach with `EACCES`, which reads as a permissions
+problem. That one at least failed loudly. A struct read at a stale offset would
+not have.
 
 ### Why not just use bcc-tools or bpftrace
 
