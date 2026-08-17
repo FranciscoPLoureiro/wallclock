@@ -177,6 +177,31 @@ struct {
 } destinations SEC(".maps");
 
 /*
+ * Sockets this process accepted rather than opened.
+ *
+ * A destination is somebody you call. Without this distinction a process that
+ * is both a server and a client reports its own callers as destinations, and
+ * under load they bury the answer: profiling the ticket office API against a
+ * load generator produced fifty-four destinations, of which fifty were the
+ * generator ephemeral ports, each with more exchanges than PostgreSQL and
+ * Redis had between them. The interval measured against a caller is real --
+ * it is the time from answering one request to receiving the next -- but it
+ * is the *client's* think time, and it is not what the word destination
+ * promises.
+ *
+ * Marked from the return of inet_csk_accept, which hands back the new socket
+ * whatever the argument list of that kernel version looks like. The limit is
+ * that a connection accepted before the session opened is not in here, so a
+ * long-lived server connection can still show up; the report says so.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_SOCKETS);
+	__type(key, __u64);
+	__type(value, __u8);
+} accepted SEC(".maps");
+
+/*
  * A permanently zeroed dest_stats, used to create a new destination.
  *
  * The obvious `struct dest_stats fresh = {};` does not fit: a BPF program has
@@ -314,6 +339,13 @@ int BPF_KPROBE(on_tcp_sendmsg, struct sock *sk)
 	if (!watched())
 		return 0;
 
+	__u64 key = (__u64)(unsigned long)sk;
+
+	/* Somebody else called us on this one, so the far end is a caller and
+	 * not a destination. */
+	if (bpf_map_lookup_elem(&accepted, &key))
+		return 0;
+
 	struct in_flight flight = {};
 
 	read_destination(sk, &flight.to);
@@ -321,8 +353,6 @@ int BPF_KPROBE(on_tcp_sendmsg, struct sock *sk)
 	if (!flight.to.daddr)
 		return 0;
 	flight.sent_ns = bpf_ktime_get_ns();
-
-	__u64 key = (__u64)(unsigned long)sk;
 
 	if (bpf_map_update_elem(&in_flight, &key, &flight, BPF_ANY) < 0)
 		bump(STAT_SOCKETS_FULL);
@@ -461,6 +491,29 @@ done:
 	/* The conversation is closed either way: leaving it open would pair
 	 * this thread's next reply with a request two exchanges old. */
 	bpf_map_delete_elem(&in_flight, &key);
+	bpf_map_delete_elem(&accepted, &key);
+	return 0;
+}
+
+/*
+ * A connection somebody else opened to us.
+ *
+ * A return probe because the socket being marked is the *result*: the
+ * argument is the listening socket, and the new connection only exists once
+ * the call comes back. It also means this does not care what arguments
+ * inet_csk_accept takes, which is a signature that has changed.
+ */
+SEC("kretprobe/inet_csk_accept")
+int BPF_KRETPROBE(on_inet_csk_accept_ret, struct sock *sk)
+{
+	if (!sk)
+		return 0;
+
+	__u64 key = (__u64)(unsigned long)sk;
+	__u8 yes = 1;
+
+	if (bpf_map_update_elem(&accepted, &key, &yes, BPF_ANY) < 0)
+		bump(STAT_SOCKETS_FULL);
 	return 0;
 }
 

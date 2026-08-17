@@ -182,20 +182,25 @@ func Open(cgroupID uint64) (_ *Session, err error) {
 		}
 	}()
 
-	// The return probe goes on before the entry probes, and the order is a
-	// dependency order rather than a preference: an entry probe attached
-	// first would record a send that nothing is yet watching for an answer
-	// to, and that thread's first exchange would be counted as unpaired.
-	// It is a window of microseconds and it is free to close.
+	// Attach order is a dependency order, and tcp_sendmsg goes on last
+	// because everything else exists to qualify what it records.
+	//
+	// A connection accepted before inet_csk_accept is watching is not known
+	// to be one somebody else opened, so a send on it would be recorded as a
+	// request to a destination -- and a server's callers would appear as its
+	// dependencies. A send recorded before the receive probes are on has
+	// nothing watching for its answer and is counted as unpaired. Both are
+	// windows of microseconds, and both are free to close.
 	for _, probe := range []struct {
 		symbol  string
 		ret     bool
 		program *ebpf.Program
 	}{
+		{"inet_csk_accept", true, s.objs.OnInetCskAcceptRet},
+		{"tcp_close", false, s.objs.OnTcpClose},
 		{"tcp_recvmsg", true, s.objs.OnTcpRecvmsgRet},
 		{"tcp_recvmsg", false, s.objs.OnTcpRecvmsg},
 		{"tcp_sendmsg", false, s.objs.OnTcpSendmsg},
-		{"tcp_close", false, s.objs.OnTcpClose},
 	} {
 		var l link.Link
 		var attachErr error

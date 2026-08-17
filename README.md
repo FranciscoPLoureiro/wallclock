@@ -157,6 +157,31 @@ It is the single most important thing this tool has to say about Go, it is
 rather than asserted, and it is why the report says so in prose underneath the
 table instead of leaving a reader to conclude that the network is fast.
 
+And who the waiting was for. This is the same Go service as above — the one
+whose network waiting does not appear as blocked time anywhere — being timed
+against its dependency anyway:
+
+```
+$ sudo wallclock destinations -for 8s
+watching every connection for 8s
+
+      destination  exchanges    mean     p50     p99     max  name
+  127.0.0.1:34677       1528  41.2ms  49.2ms  49.2ms  65.8ms
+
+1 destinations. p50 and p99 are bucket ceilings, not interpolations
+1539 answers arrived with no outstanding request on their connection. That is
+normal for the receiving end of anything: a server reading a request has sent
+nothing yet.
+nothing lost
+```
+
+**41.2 ms measured against 40 ms injected, and no thread blocked for any of
+it.** The server holds every request for exactly 40 ms; the client is ordinary
+`net/http`, so its goroutines park in the netpoller and phase 2 sees nothing.
+The interval is timed from the send to the first bytes back, which is a
+property of the conversation rather than of the scheduler — see
+[what phase 3 decided about this](#and-what-this-decided-about-phase-4).
+
 Syscall entries per process, counted inside the kernel, filtered inside the
 kernel, with what was thrown away reported rather than assumed:
 
@@ -1082,6 +1107,61 @@ macros rather than plain C dereferences; a plain one compiles, loads, and
 reads the wrong bytes, which is the failure mode this decision exists to
 prevent and the reason it is written down before the first such access is
 written.
+
+#### The case that makes it concrete: reading a socket's far end
+
+Phase 4 needs two fields of `struct sock` — the peer's address and port — and
+they are the sharpest example of why the offsets cannot be compiled in. This
+is the entire declaration:
+
+```c
+struct sock_common {
+	__be32 skc_daddr;
+	__be16 skc_dport;
+} __attribute__((preserve_access_index));
+
+struct sock {
+	struct sock_common __sk_common;
+} __attribute__((preserve_access_index));
+```
+
+In the real kernel neither field sits where that says it does. `struct sock`
+has over a hundred members and `sock_common` around forty, and both of these
+live inside *anonymous unions*, beside aliases that let the kernel compare an
+address and a port in a single 64-bit load:
+
+```c
+union {
+	__addrpair skc_addrpair;
+	struct { __be32 skc_daddr; __be32 skc_rcv_saddr; };
+};
+```
+
+Their byte offsets move with the kernel version and with build configuration —
+`CONFIG_NET_NS`, `CONFIG_XFRM` and others each add or remove members ahead of
+them. Nothing warns when that happens. A program compiled against the wrong
+offset does not crash; it reads whatever is there and reports a plausible IPv4
+address belonging to nobody, in a table full of addresses.
+
+What the relocation does is replace the question. `preserve_access_index` makes
+clang record *"the field named `skc_daddr` inside `struct sock_common`"* rather
+than a number, and at load time libbpf looks that name up in the BTF the
+running kernel publishes about itself and patches in whatever offset that
+kernel actually uses. The binary works on a kernel it has never seen because it
+was never told an offset in the first place.
+
+Two consequences worth stating. The fields left out of the declaration cannot
+be got wrong, since matching is by name and nothing else is looked up — which
+is why declaring two members of a struct with a hundred is not a shortcut. And
+the anonymous unions do not need declaring at all, because BTF flattens
+anonymous members into their parent, so `skc_daddr` is found as a member of
+`sock_common` exactly as written.
+
+The failure mode this replaces is not theoretical for this project: phase 2
+lost a day to a *tracepoint* whose field offsets shifted between 6.6 and 6.17,
+and the kernel refused the attach with `EACCES`, which reads as a permissions
+problem. That one at least failed loudly. A struct read at a stale offset would
+not have.
 
 ### Why not just use bcc-tools or bpftrace
 
