@@ -165,6 +165,15 @@ overhead: build ## Measure what the tool costs against event rate (needs root)
 	# resolution of the whole exercise.
 	$(SUDO) $(BIN) overhead -for $(OVERHEAD_WINDOW) -repeats $(OVERHEAD_REPEATS)
 
+COMPARE_WINDOW ?= 12
+
+.PHONY: compare
+compare: build ## Run wallclock, offcputime and runqlat on the same subjects (needs root)
+	# The evidence behind "why not just use bcc-tools". Needs bpfcc-tools;
+	# the script says so and stops if they are missing rather than producing
+	# half a comparison.
+	$(SUDO) env WINDOW=$(COMPARE_WINDOW) sh scripts/compare-tools.sh
+
 .PHONY: flamegraph
 flamegraph: build ## Record off-CPU stacks and render a flame graph (needs root)
 	# An off-CPU flame graph, not the usual kind: the width of a frame is not
