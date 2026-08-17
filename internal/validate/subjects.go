@@ -86,6 +86,56 @@ func observe(suffix string, withReasons bool, workload func() error) (*observati
 	return obs, nil
 }
 
+// blockedFor totals the subject threads' blocked time filed under one reason.
+func (o *observation) blockedFor(reason offcpu.Reason) time.Duration {
+	mine := make(map[uint32]struct{}, len(o.threads))
+	for _, t := range o.threads {
+		mine[t.TID] = struct{}{}
+	}
+	var total time.Duration
+	for _, b := range o.blocked {
+		if _, ok := mine[b.TID]; !ok {
+			continue
+		}
+		if b.Reason == reason {
+			total += b.Duration
+		}
+	}
+	return total
+}
+
+// byReason totals the subject threads' blocked time under every reason.
+//
+// Used to say what a scenario got *instead* of what it expected. A network
+// scenario that comes up short has two very different explanations -- the
+// waiting was misfiled under another reason, or it was never seen at all --
+// and the difference is visible only by printing all the columns.
+func (o *observation) byReason() map[offcpu.Reason]time.Duration {
+	mine := make(map[uint32]struct{}, len(o.threads))
+	for _, t := range o.threads {
+		mine[t.TID] = struct{}{}
+	}
+	totals := make(map[offcpu.Reason]time.Duration)
+	for _, b := range o.blocked {
+		if _, ok := mine[b.TID]; ok {
+			totals[b.Reason] += b.Duration
+		}
+	}
+	return totals
+}
+
+// describe renders the subject's blocked time, by reason and in total, for an
+// error message.
+func (o *observation) describe() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d subject thread(s), blocked %v in total",
+		len(o.threads), o.sum(func(t offcpu.Thread) time.Duration { return t.Blocked }))
+	for reason, total := range o.byReason() {
+		fmt.Fprintf(&b, ", %s %v", reason, total)
+	}
+	return b.String()
+}
+
 // sum adds one field over every subject thread.
 func (o *observation) sum(field func(offcpu.Thread) time.Duration) time.Duration {
 	var total time.Duration

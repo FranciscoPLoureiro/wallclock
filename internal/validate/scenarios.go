@@ -24,6 +24,7 @@ func Scenarios() []Scenario {
 		sleepScenario(),
 		runqueueScenario(),
 		throttlingScenario(),
+		netemScenario(),
 	}
 }
 
