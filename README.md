@@ -56,7 +56,7 @@ of them produce.
 | 3 | What the Go runtime makes invisible from the kernel's side | ✅ done |
 | 4 | Network time attributed to individual destinations | ✅ done — [in the shape phase 3 forced on it](#and-what-this-decided-about-phase-4) |
 | 5 | Validation against injected latency, and measured overhead | ✅ done |
-| 6 | Point it at a real service and answer a real question | planned |
+| 6 | Point it at a real service and answer a real question | ✅ done — [the answer](#pointing-it-at-the-question-it-was-built-for) |
 
 The question in phase 6 comes from the project this one grew out of:
 [High Concurrency Ticket Office](https://github.com/FranciscoPLoureiro/HighConcurrencyTicketOffice),
@@ -782,6 +782,89 @@ accepted *before* profiling starts is not marked, so a server that already has
 clients still shows them. The way to get a clean answer is to attach first and
 start the traffic afterwards, which is how the measurement above was taken —
 on the second attempt.
+
+### Pointing it at the question it was built for
+
+**Context.** The project this one grew out of left a sentence in its README: at
+100 virtual users the p99 went from 153 ms to 291 ms once Prometheus and
+Grafana were sharing the machine, and it could not say where the difference
+went. That is a correlation. This section is what the tool says about it.
+
+**Framing, because it decides how to read the rest.** The deliverable is the
+tool and the method, not the verdict. A decomposition that closes to 100% is
+worth having whichever category wins, and the answer below is not the one the
+question implies.
+
+**Method.** The ticket office at 100 VUs, twice: once with Prometheus and
+Grafana stopped, once with them running, everything else identical and reset
+between runs. Both views of wallclock over both conditions, and — this matters
+— *the same profiling protocol in both*, because the profiler is not free and
+comparing a heavily observed run against a lightly observed one measures the
+observer.
+
+**The decomposition, side by side.** Seven consecutive 25-second windows in
+each condition, the busiest kept:
+
+| | without Prometheus & Grafana | with |
+|---|---|---|
+| threads | 5 | 6 |
+| thread-time | 1m58.08s | 2m15.49s |
+| on-CPU | 20.7% (24.39s) | 21.5% (29.12s) |
+| **runqueue** | **0.4% (442.7ms)** | **0.5% (704.6ms)** |
+| **throttled** | **0.1% (84.9ms)** | **0.1% (128.9ms)** |
+| blocked | 78.9% | 77.9% |
+
+**Neither of the two things this tool was built to separate is happening.**
+The API is not queued behind a full machine — runqueue delay is half a per
+cent — and it is not held off by its own cgroup quota, which is a tenth of
+one. Those are the two explanations that "the observability stack stole the
+CPU" would produce, and the decomposition rules out both. It also rules them
+out *in the same table*, which is the point of a closed account: there is
+nowhere else for the time to be hiding.
+
+**Where it actually went.** The destination view, same load, same protocol:
+
+| destination | without | with | change |
+|---|---|---|---|
+| redis, mean | 1.2 ms | 1.4 ms | +17% |
+| redis, p99 | 3.6 ms | 4.1 ms | +14% |
+| postgres, mean | 5.4 ms | 6.9 ms | +28% |
+| postgres, p99 | 81.9 ms | 114.7 ms | +40% |
+| rabbitmq, mean | 1.6 ms | 2.5 ms | +56% |
+| rabbitmq, p99 | 6.1 ms | 20.5 ms | **+236%** |
+
+**Every dependency answers more slowly, and the API itself does not change.**
+Whatever the observability containers took, they took it from PostgreSQL,
+Redis and RabbitMQ rather than from the service under test. That is not the
+answer the original sentence implies, and it is the more useful one: the fix
+it points at is where the dependencies run, not how much CPU the API is given.
+
+**What this does not establish, said plainly.** The dependency slow-downs are
+fractions of a millisecond per round trip, and they do not add up to the
+end-to-end difference. Part of the increase remains unaccounted for, and the
+honest reading of the tables above is *"the API is not the bottleneck and its
+dependencies are measurably slower"*, not *"here is a complete arithmetic of
+the extra milliseconds"*.
+
+**And a confounder worth publishing rather than hiding.** The end-to-end
+figures moved with how much profiling was attached:
+
+| condition | observation running | requests/s | mean |
+|---|---|---|---|
+| without | destinations only | 3 577 | 24.18 ms |
+| without | one 20 s profile | 3 366 | 25.68 ms |
+| without | seven 25 s profiles | 3 030 | 28.53 ms |
+| with | destinations only | 2 957 | 29.27 ms |
+| with | seven 25 s profiles | 2 959 | 29.25 ms |
+
+Under the light protocol the gap between conditions is 17% of throughput;
+under the heavy one it is 2%. Both numbers are real and they describe
+different experiments. The matched pairs above are the ones to read, and the
+[overhead curve](#how-this-was-validated-and-what-it-costs) is where the cost
+of the tool itself is measured properly. Reproducibility within a condition is
+good — two independent runs of the loaded case gave 2 957 and 2 959 requests a
+second — which is what makes the disagreement between protocols a real effect
+rather than noise.
 
 ### How this was validated, and what it costs
 
