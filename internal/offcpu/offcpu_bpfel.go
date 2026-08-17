@@ -43,8 +43,8 @@ type offcpuThread struct {
 	BlockStackId       int32
 	State              uint32
 	Tid                uint32
+	Tgid               uint32
 	Comm               [16]int8
-	_                  [4]byte
 }
 
 type offcpuThrottle struct {

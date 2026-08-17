@@ -228,6 +228,30 @@ struct thread {
 	__s32 block_stack_id;
 	__u32 state;
 	__u32 tid;
+	/*
+	 * The process this thread belongs to, or zero until something that
+	 * knows has said so.
+	 *
+	 * A thread is the unit the scheduler moves and the wrong unit to reason
+	 * about a service with. A Go runtime spreads one server across as many
+	 * threads as it has cores and hands them to whichever goroutine needs
+	 * one next, so no single thread's decomposition describes the process
+	 * and reading them one by one describes nothing at all. Rolling them up
+	 * needs the group they belong to, and this is it.
+	 *
+	 * Sticky, and filled in when the answer arrives rather than demanded up
+	 * front, for the same reason cgroup_id is: only some of these events
+	 * can answer the question. At sched_switch the running task is the one
+	 * leaving, so bpf_get_current_pid_tgid speaks for prev and says nothing
+	 * about next; at a wakeup it speaks for whoever did the waking. The
+	 * exit program has the task_struct in its hand and is authoritative,
+	 * which is what makes even a thread that never switched out end up with
+	 * a process.
+	 *
+	 * It costs nothing: the four bytes land in the padding the compiler was
+	 * already adding after comm[16].
+	 */
+	__u32 tgid;
 	char comm[16];
 };
 
@@ -420,7 +444,7 @@ static __always_inline int tracked(__u32 tid)
 	return bpf_map_lookup_elem(&targets, &tid) != 0;
 }
 
-static __always_inline void start_fresh(struct thread *t, __u32 tid,
+static __always_inline void start_fresh(struct thread *t, __u32 tid, __u32 tgid,
 					const char *comm, enum thread_state state,
 					__u64 now)
 {
@@ -436,6 +460,7 @@ static __always_inline void start_fresh(struct thread *t, __u32 tid,
 	t->block_stack_id = -1;
 	t->state = state;
 	t->tid = tid;
+	t->tgid = tgid;
 	if (comm)
 		__builtin_memcpy(&t->comm, comm, sizeof(t->comm));
 }
@@ -557,7 +582,7 @@ enum arrival {
 	/* A wakeup_new: this task did not exist until now. */
 	ARRIVAL_NEW = 2,
 };
-static __always_inline void transition(__u32 tid, const char *comm,
+static __always_inline void transition(__u32 tid, __u32 tgid, const char *comm,
 				       enum thread_state next_state, __u64 now,
 				       enum arrival arrival, __u64 cgroup_id,
 				       __s32 stack_id)
@@ -573,7 +598,7 @@ static __always_inline void transition(__u32 tid, const char *comm,
 		 * observed so the reader can see it is not the full window.
 		 */
 		struct thread fresh = {};
-		start_fresh(&fresh, tid, comm, next_state, now);
+		start_fresh(&fresh, tid, tgid, comm, next_state, now);
 		long err = bpf_map_update_elem(&threads, &tid, &fresh, BPF_NOEXIST);
 		/* -EEXIST means another CPU saw this thread first, which is a
 		 * race and not a full map. There is nothing to credit on a
@@ -589,7 +614,7 @@ static __always_inline void transition(__u32 tid, const char *comm,
 	if (t->state == STATE_EXITED) {
 		if (arrival != ARRIVAL_NEW)
 			return;
-		start_fresh(t, tid, comm, next_state, now);
+		start_fresh(t, tid, tgid, comm, next_state, now);
 		return;
 	}
 
@@ -623,6 +648,17 @@ static __always_inline void transition(__u32 tid, const char *comm,
 	 */
 	if (cgroup_id)
 		t->cgroup_id = cgroup_id;
+
+	/*
+	 * The same rule, for the same reason: kept when an event that knows
+	 * turns up, ignored when one that does not passes zero. Unlike the
+	 * cgroup this cannot change over a thread's life at all -- a task's
+	 * tgid is fixed unless it execs its way into being a group leader --
+	 * so the only thing being waited for here is the first event able to
+	 * say it.
+	 */
+	if (tgid)
+		t->tgid = tgid;
 
 	credit_elapsed(t, now);
 	t->state = next_state;
@@ -687,14 +723,22 @@ int on_sched_switch(struct sched_switch_ctx *ctx)
 				bump(STAT_STACKS_LOST);
 		}
 		/* A switch-out: this is where a dying thread last switch
-		 * arrives, moments after its exit event. */
-		transition(prev, comm, runnable ? STATE_RUNQUEUE : STATE_BLOCKED,
+		 * arrives, moments after its exit event.
+		 *
+		 * The process comes from the same place the cgroup does, and is
+		 * correct for the same reason: this tracepoint fires from
+		 * inside __schedule before the registers are swapped, so
+		 * current is still prev. It would be quietly wrong for next,
+		 * which is why next is given nothing and waits for a switch of
+		 * its own. */
+		transition(prev, (__u32)(bpf_get_current_pid_tgid() >> 32), comm,
+			   runnable ? STATE_RUNQUEUE : STATE_BLOCKED,
 			   now, ARRIVAL_TAIL, bpf_get_current_cgroup_id(), stack_id);
 	}
 
 	if (tracked(next)) {
 		__builtin_memcpy(comm, ctx->next_comm, sizeof(comm));
-		transition(next, comm, STATE_ON_CPU, now, ARRIVAL_LIVE, 0, -1);
+		transition(next, 0, comm, STATE_ON_CPU, now, ARRIVAL_LIVE, 0, -1);
 	}
 
 	return 0;
@@ -713,7 +757,10 @@ int on_sched_wakeup(struct sched_wakeup_ctx *ctx)
 		return 0;
 	char comm[16];
 	__builtin_memcpy(comm, ctx->comm, sizeof(comm));
-	transition(tid, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_LIVE, 0, -1);
+	/* No process id: at a wakeup the running task is whoever did the
+	 * waking, so bpf_get_current_pid_tgid would file this thread under
+	 * someone else's process. */
+	transition(tid, 0, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_LIVE, 0, -1);
 	return 0;
 }
 
@@ -725,7 +772,7 @@ int on_sched_wakeup_new(struct sched_wakeup_ctx *ctx)
 		return 0;
 	char comm[16];
 	__builtin_memcpy(comm, ctx->comm, sizeof(comm));
-	transition(tid, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_NEW, 0, -1);
+	transition(tid, 0, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_NEW, 0, -1);
 	return 0;
 }
 
@@ -868,6 +915,17 @@ int BPF_PROG(on_sched_process_exit, struct task_struct *task)
 	char comm[16];
 	BPF_CORE_READ_INTO(&comm, task, comm);
 
+	/*
+	 * And the process, from the same task, for a related reason. Every
+	 * other program has to infer this from whichever task happens to be
+	 * running; here it is a field of the thread that is dying. A thread
+	 * that lived entirely between two of its own switches -- so briefly
+	 * that it was never prev at a sched_switch -- would otherwise be
+	 * reported with no process at all, and short-lived threads are exactly
+	 * what a report about process churn is made of.
+	 */
+	__u32 tgid = (__u32)BPF_CORE_READ(task, tgid);
+
 	struct thread *t = bpf_map_lookup_elem(&threads, &tid);
 	if (!t) {
 		/*
@@ -880,7 +938,7 @@ int BPF_PROG(on_sched_process_exit, struct task_struct *task)
 		 * on the next read.
 		 */
 		struct thread headstone = {};
-		start_fresh(&headstone, tid, comm, STATE_EXITED, now);
+		start_fresh(&headstone, tid, tgid, comm, STATE_EXITED, now);
 		long err = bpf_map_update_elem(&threads, &tid, &headstone,
 					       BPF_NOEXIST);
 		if (err == -EEXIST) {
@@ -890,6 +948,7 @@ int BPF_PROG(on_sched_process_exit, struct task_struct *task)
 			 * alive forever. */
 			t = bpf_map_lookup_elem(&threads, &tid);
 			if (t) {
+				t->tgid = tgid;
 				credit_elapsed(t, now);
 				t->state = STATE_EXITED;
 				t->since_ns = now;
@@ -901,6 +960,7 @@ int BPF_PROG(on_sched_process_exit, struct task_struct *task)
 	}
 
 	__builtin_memcpy(&t->comm, comm, sizeof(t->comm));
+	t->tgid = tgid;
 	credit_elapsed(t, now);
 	t->state = STATE_EXITED;
 	t->since_ns = now;
