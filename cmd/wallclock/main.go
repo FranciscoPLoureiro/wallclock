@@ -26,6 +26,8 @@ usage:
   wallclock load <object.o>    load a compiled BPF object and report the verifier output
   wallclock syscount [flags]   count syscall entries per process (-h for flags)
   wallclock profile [flags]    split wall clock into on-CPU, runqueue and blocked
+  wallclock validate [flags]   measure the tool against answers known in advance
+  wallclock overhead [flags]   measure what the tool costs, against event rate
 
 All of them exit non-zero on failure, so any can gate a build.
 `
@@ -53,6 +55,10 @@ func main() {
 		err = runProfile(flag.Args()[1:])
 	case "syscount":
 		err = runSyscount(flag.Args()[1:])
+	case "validate":
+		err = runValidate(flag.Args()[1:])
+	case "overhead":
+		err = runOverhead(flag.Args()[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		fmt.Fprint(os.Stderr, usage)

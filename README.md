@@ -55,7 +55,7 @@ of them produce.
 | 2 | Off-CPU, runqueue delay, and cgroup throttling separated | ✅ done |
 | 3 | What the Go runtime makes invisible from the kernel's side | ✅ done |
 | 4 | Network time attributed to individual destinations | planned — [phase 3 changed what it should be](#and-what-this-decided-about-phase-4) |
-| 5 | Validation against injected latency, and measured overhead | planned |
+| 5 | Validation against injected latency, and measured overhead | ✅ done |
 | 6 | Point it at a real service and answer a real question | planned |
 
 The question in phase 6 comes from the project this one grew out of:
@@ -699,6 +699,137 @@ time is not where the answer lives.
 That reframing is not a rescue of a phase that failed. It is the phase before
 it doing its job: phase 3 was placed ahead of phase 4 precisely so that a week
 would not be spent building the wrong thing, and it was.
+
+### How this was validated, and what it costs
+
+**Context.** A measuring tool that has not been measured is an opinion. Every
+other test here compares wallclock against arithmetic derived from what
+wallclock observed, or against a second reading of the same kernel counters.
+Neither answers the question a reader actually has, which is whether these
+numbers mean anything at all.
+
+**Ground truth.** So the answer is decided first — a thread will sleep for
+exactly three seconds, forty-eight spinners will share sixteen cores, a cgroup
+will be allowed exactly half a CPU, a socket will be delayed by exactly 50 ms
+in each direction — and the tool is then asked what it saw. `wallclock
+validate` runs all five and exits non-zero if any lands outside its band:
+
+```
+$ sudo wallclock validate
+scenario           category           expected  reported  error  tolerance
+sleep              blocked            3s        3.028s    +0.9%  2.97s to 3.25s   ok
+runqueue delay     runqueue           2s        1.969s    -1.5%  1.8s to 2.16s    ok
+cgroup throttling  throttled          1.5s      1.497s    -0.2%  1.38s to 1.575s  ok
+futex contention   blocked (futex)    6s        6.065s    +1.1%  5.4s to 6.3s     ok
+network delay      blocked (network)  2.6s      2.626s    +1.0%  2.522s to 2.99s  ok
+
+how each expected value is known:
+  sleep              30 sleeps of 100ms
+  runqueue delay     48 spinners on 16 cores, so 1-16/48 of each life is queued
+  cgroup throttling  cpu.max 50000 100000, so 50% of a spinner's life is forbidden
+  futex contention   3 threads taking turns to hold one lock for 20ms each, over 3s
+  network delay      netem 50ms on lo, charged both ways, over 25 round trips and a connect
+```
+
+**"Approximately 50 ms" is not an assertion; "between 48 and 55 ms" is.** Each
+band is declared per scenario rather than as one global percentage, because
+the error in each has a different shape *and a different sign*. A sleep can
+return late and never early, and this tool can only miss time at the start, so
+that band is tight below and loose above. The runqueue arithmetic assumes the
+subjects are the only runnable work on the machine, which is never quite true,
+and everything else running pushes the measured share up. Throttling gets the
+tightest band because the kernel and the tool are measuring the same thing from
+two sides — and that row is *also* checked against `cpu.stat` inside the
+scenario, where a disagreement is returned as an error rather than absorbed by
+a wide tolerance. It is not a matter of degree: two sources that share no code
+either agree or one of them is broken.
+
+Two facts had to be measured before the network row could be written, and both
+would have made the table read like a defect if they had been assumed. netem
+on the loopback device charges its delay in *both* directions, so a round trip
+costs twice what was configured — `ping 127.0.0.1` under `netem delay 50ms`
+reports an RTT of 100.6 ms. And a blocking `connect` pays a full round trip of
+its own, measured at 100.5 ms against 101 ms for each subsequent exchange, so
+the expectation is twenty-six round trips and not twenty-five.
+
+That row also exists in the shape it does because of
+[what phase 3 found](#the-go-execution-model-and-what-it-hides-from-the-kernel):
+injected network latency can only be validated against something that stops a
+*thread*, and almost nothing does. The subject is a raw blocking socket on a
+pinned thread. The echo server it talks to is an ordinary Go listener, which
+is the finding being used rather than worked around — a netpolled runtime
+cannot pollute a network-blocked total because it is incapable of producing
+one.
+
+**The validation found a defect in the tool.** The network row first reported
+2.524s against 2.6s and scraped the bottom of its band. The time was all
+there; the *reason* for exactly one interval was not. A blocked thread's stack
+is recorded on the transition into blocked, except on the transition that
+creates the entry — so a thread that was already holding a CPU when profiling
+started, and whose next move was to stop, lost the explanation for that wait.
+Few threads, and an unbounded amount of time, since the wait they begin can
+last the whole window. Fixed, and the row now reads 2.624s, +0.9%, with the
+reasons closing exactly.
+
+**Overhead, and the noise floor.** Not measured against the ticket office, and
+the reason is arithmetic: that target's own documented variance is 153 ms to
+333 ms at the p99, and the effect being looked for is a few per cent. The
+signal would be an order of magnitude under the noise. So the load is
+synthetic and tunable — two pinned threads passing a byte through a pipe, with
+adjustable CPU work between round trips — and the answer is a curve.
+
+Measured on the machine declared below, 2 s runs, median of five:
+
+```
+$ sudo wallclock overhead -for 2s -repeats 5
+  pairs  work/trip  switches/s  baseline trips/s  profiled trips/s     overhead  noise  lost
+      1       20ms          99                50                50  under noise   0.0%  none
+      1        2ms         917               458               460  under noise   0.9%  none
+      1      200µs        5378              2689              2746  under noise   2.1%  none
+      1       20µs       13603              6802              6252        +8.1%   5.3%  none
+      1         0s       20871             10436             10530  under noise   4.3%  none
+      4         0s       73978             36989             34880        +5.7%   0.8%  none
+     16         0s      209227            104614            102664  under noise   2.8%  none
+     64         0s      212570            106285            106714  under noise   1.4%  none
+```
+
+**The noise column is the point.** Cost is a difference between two runs, and
+two runs of anything on a real machine differ — cores change frequency, other
+work wakes, the pipe buffer is warmer the second time. So every row also
+measures two *identical unprofiled* runs against each other, which is what
+this method reports when the true answer is known to be zero. Anything smaller
+than that has not been measured, and prints as `under noise` rather than as a
+number somebody would quote back.
+
+The one clean reading is **5.7% at seventy-four thousand context switches a
+second, against a noise floor of 0.8%**. Above that the load saturates sixteen
+cores by itself and the method can no longer resolve the profiler at all,
+which is worth saying plainly rather than filling the row with a figure.
+
+**The limit that is actually reachable is not the event rate.** A quarter of a
+million switches a second loses nothing, because the same few threads are
+switching and the map holding them stays the same size. What fills it is *new*
+threads: a slot is released only when userspace reads the map and drains the
+ones that exited, so the number that matters is threads between reads.
+
+```
+  processes  per second  threads held  events dropped  stacks lost
+       2000        5176          2076               0            0
+       8000        4069          8103               0            0
+      20000        4354         16384           18417            0
+```
+
+16 384 is `max_entries` exactly. Past it the tool drops events, counts them,
+and says so on every report — a tool that loses five per cent of its events in
+silence lies with confidence. The streaming path has the same property and a
+far lower ceiling, measured in phase 1: 13 455 aggregated entries with no loss
+at all against 1 591 513 events delivered and 28 653 339 dropped over the same
+window, which is why aggregation happens in the kernel and the ring buffer is
+reserved for detail that cannot be reduced.
+
+**Environment.** WSL2 Debian 13, kernel 6.6.87.2-microsoft-standard-WSL2, 16
+CPUs, 7.6 GB, ext4. Every number above comes from that host and is reproducible
+with `make validate` and `make overhead`.
 
 ### Blocked time and runqueue delay are different numbers
 
