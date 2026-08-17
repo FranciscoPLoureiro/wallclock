@@ -34,12 +34,46 @@ type observation struct {
 // observe opens a profiling session, runs the workload, and returns the
 // threads whose names begin with the given subject suffix.
 //
-// The session is opened before the workload starts and read after it
-// finishes, so the window covers the whole of it. A thread is only ever
-// observed from its first scheduler event, so a subject that is created after
-// the session opens has its entire life inside the window -- which is what
-// makes the expected values arithmetic rather than estimates.
-func observe(suffix string, withReasons bool, workload func() error) (*observation, error) {
+// prepare, when given, runs *before* the session opens, and it exists because
+// of a measurement that came out 6% too high. A scenario whose subjects are
+// goroutines on pinned threads does not get fresh threads: the Go runtime
+// hands out threads it already has, and a reused thread arrives carrying a
+// life of its own. Since the kernel side refreshes a thread's name on every
+// transition -- deliberately, because threads are reused -- that earlier life
+// is matched by name and counted against the scenario. Three subjects came in
+// with 121 ms each of history apiece.
+//
+// A scenario that cares can therefore create and warm its subjects in
+// prepare, leaving the session to open around the part that is being
+// measured. What matters is that a subject must be holding a CPU rather than
+// waiting when the session opens: a thread parked in futex is discovered by
+// its wakeup, and the wait it was already in is counted from the moment
+// profiling began.
+func observe(suffix string, withReasons bool, prepare, workload func() error) (*observation, error) {
+	// The symbol table is loaded before anything starts, and that ordering
+	// cost 282 ms of a 6 s answer to find.
+	//
+	// It used to be loaded after the workload and before the maps were read.
+	// /proc/kallsyms is a hundred thousand lines and parsing it takes tens of
+	// milliseconds, during which the subjects have finished and their threads
+	// are parked -- so every scenario was charged its own symbol lookup as
+	// blocked time. The futex scenario reported 4.6% more waiting than three
+	// threads could physically do in the elapsed wall clock, which is how it
+	// was noticed: the number was not merely high, it was impossible.
+	var symbols *ksyms.Table
+	if withReasons {
+		var err error
+		if symbols, err = ksyms.Load(); err != nil {
+			return nil, fmt.Errorf("naming kernel stacks: %w", err)
+		}
+	}
+
+	if prepare != nil {
+		if err := prepare(); err != nil {
+			return nil, err
+		}
+	}
+
 	session, err := offcpu.Open(0)
 	if err != nil {
 		return nil, fmt.Errorf("open a profiling session: %w", err)
@@ -51,11 +85,7 @@ func observe(suffix string, withReasons bool, workload func() error) (*observati
 	}
 
 	obs := &observation{}
-	var symbols *ksyms.Table
 	if withReasons {
-		if symbols, err = ksyms.Load(); err != nil {
-			return nil, fmt.Errorf("naming kernel stacks: %w", err)
-		}
 		// Reasons before totals, then open waits: the other order counts an
 		// interval that ends between the two reads twice. See BlockedReasons.
 		if obs.blocked, err = session.BlockedReasons(symbols); err != nil {

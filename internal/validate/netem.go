@@ -79,7 +79,7 @@ func netemScenario() Scenario {
 			}
 			defer server.Close()
 
-			obs, err := observe("netem", true, func() error {
+			obs, err := observe("netem", true, nil, func() error {
 				done := make(chan error, 1)
 				go func() { done <- blockingRoundTrips(server.Addr().String(), netemTrips) }()
 				return <-done

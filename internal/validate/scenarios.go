@@ -24,6 +24,7 @@ func Scenarios() []Scenario {
 		sleepScenario(),
 		runqueueScenario(),
 		throttlingScenario(),
+		futexScenario(),
 		netemScenario(),
 	}
 }
@@ -51,7 +52,7 @@ func sleepScenario() Scenario {
 		Low:  window - 30*time.Millisecond,
 		High: window + 250*time.Millisecond,
 		Run: func() (time.Duration, error) {
-			obs, err := observe("sleeper", false, func() error {
+			obs, err := observe("sleeper", false, nil, func() error {
 				done := make(chan error, 1)
 				go func() {
 					unpin, err := nameThisThread("sleeper")
@@ -101,7 +102,7 @@ func runqueueScenario() Scenario {
 		High: time.Duration(1.08 * share * float64(window)),
 		Run: func() (time.Duration, error) {
 			var group *spinners
-			obs, err := observe("spin", false, func() error {
+			obs, err := observe("spin", false, nil, func() error {
 				var err error
 				if group, err = startSpinners(threads, "spin"); err != nil {
 					return err
@@ -168,7 +169,7 @@ func throttlingScenario() Scenario {
 
 			var group *spinners
 			var kernelSays time.Duration
-			obs, err := observe("throttled", false, func() error {
+			obs, err := observe("throttled", false, nil, func() error {
 				var err error
 				if group, err = startSpinners(1, "throttled"); err != nil {
 					return err
