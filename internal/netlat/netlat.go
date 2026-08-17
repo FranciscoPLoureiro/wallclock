@@ -31,8 +31,36 @@ import (
 
 //go:generate go tool bpf2go -target bpfel -type destination -type dest_stats -type stat_slot netlat ../../bpf/netlat.bpf.c -- -D__TARGET_ARCH_x86 -I/usr/include/x86_64-linux-gnu
 
-// slots mirrors MAX_SLOTS in the BPF program.
-const slots = 32
+// These mirror the histogram shape in the BPF program: four buckets per
+// octave, over thirty-two octaves of microseconds.
+const (
+	slots      = 128
+	subBits    = 2
+	subBuckets = 1 << subBits
+)
+
+// bucketCeiling is the largest duration that lands in a bucket.
+//
+// Below subBuckets microseconds each value has a bucket to itself. Above it a
+// bucket covers a quarter of an octave: the values in octave o whose top two
+// mantissa bits are s run up to (subBuckets + s + 1) << (o - subBits).
+func bucketCeiling(slot int) time.Duration {
+	if slot < subBuckets {
+		return time.Duration(slot+1) * time.Microsecond
+	}
+	octave := slot / subBuckets
+	sub := slot % subBuckets
+	if octave < subBits {
+		// Unreachable -- anything in octave 0 or 1 was handled above -- but
+		// arithmetic that would otherwise shift by a negative amount should
+		// not depend on that staying true.
+		return time.Duration(slot+1) * time.Microsecond
+	}
+	// The last slot is 127: octave 31, a shift of 29, so a ceiling of about
+	// 4295 seconds expressed in microseconds. Nowhere near overflowing a
+	// signed nanosecond Duration, which runs to 292 years.
+	return time.Duration(uint64(subBuckets+sub+1)<<(octave-subBits)) * time.Microsecond //nolint:gosec // see above
+}
 
 // Destination is the far end of a connection.
 type Destination struct {
@@ -51,8 +79,8 @@ type Stats struct {
 	Count uint64
 	Total time.Duration
 	Max   time.Duration
-	// Buckets is a log2 histogram of microseconds: bucket n holds the
-	// exchanges that took between 2^n and 2^(n+1) microseconds.
+	// Buckets is a histogram of microseconds with four buckets to the
+	// octave. bucketCeiling says what each one covers.
 	Buckets [slots]uint64
 }
 
@@ -68,10 +96,11 @@ func (s Stats) Mean() time.Duration {
 // the bucket the sample falls in.
 //
 // An upper bound and not an interpolation, and the difference matters when
-// somebody quotes the number. A log2 histogram knows only that a sample was
-// between 2^n and 2^(n+1) microseconds; interpolating inside a bucket that
-// wide invents precision the data does not have. So a p99 of "4ms" here means
-// "at or below 4 ms", which is what the measurement supports.
+// somebody quotes the number. The histogram knows only which bucket a sample
+// landed in; interpolating inside it would invent precision the data does not
+// have. So a p99 of "4ms" here means "at or below 4 ms", which is what the
+// measurement supports. Four buckets to the octave bounds that overstatement
+// at 25%.
 func (s Stats) Percentile(q float64) time.Duration {
 	if s.Count == 0 {
 		return 0
@@ -84,7 +113,7 @@ func (s Stats) Percentile(q float64) time.Duration {
 	for i, n := range s.Buckets {
 		seen += n
 		if seen >= target {
-			return time.Duration(1<<(i+1)) * time.Microsecond
+			return bucketCeiling(i)
 		}
 	}
 	return s.Max
@@ -166,6 +195,7 @@ func Open(cgroupID uint64) (_ *Session, err error) {
 		{"tcp_recvmsg", true, s.objs.OnTcpRecvmsgRet},
 		{"tcp_recvmsg", false, s.objs.OnTcpRecvmsg},
 		{"tcp_sendmsg", false, s.objs.OnTcpSendmsg},
+		{"tcp_close", false, s.objs.OnTcpClose},
 	} {
 		var l link.Link
 		var attachErr error

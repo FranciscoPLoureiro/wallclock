@@ -245,15 +245,16 @@ func TestEmptyStatsAreQuiet(t *testing.T) {
 // than an interpolation, and the test says which.
 func TestPercentileReturnsTheBucketCeiling(t *testing.T) {
 	var s netlat.Stats
-	// 90 samples in the 8-16us bucket, 10 in the 1024-2048us bucket.
+	// 90 samples in the bucket that ends at 4us, 10 in the one that ends at
+	// 40960us -- octave 15, first quarter.
 	s.Buckets[3] = 90
-	s.Buckets[10] = 10
+	s.Buckets[60] = 10
 	s.Count = 100
 
-	if got, want := s.Percentile(0.5), 16*time.Microsecond; got != want {
+	if got, want := s.Percentile(0.5), 4*time.Microsecond; got != want {
 		t.Errorf("p50 = %v, want %v: the ceiling of the bucket holding the median", got, want)
 	}
-	if got, want := s.Percentile(0.99), 2048*time.Microsecond; got != want {
+	if got, want := s.Percentile(0.99), 40960*time.Microsecond; got != want {
 		t.Errorf("p99 = %v, want %v: the ceiling of the bucket holding the tail", got, want)
 	}
 }

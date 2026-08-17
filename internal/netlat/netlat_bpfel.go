@@ -18,7 +18,7 @@ type netlatDestStats struct {
 	Count   uint64
 	TotalNs uint64
 	MaxNs   uint64
-	Slots   [32]uint64
+	Slots   [128]uint64
 }
 
 type netlatDestination struct {
@@ -48,10 +48,12 @@ const (
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	netlatMapBlankStats        = "blank_stats"
 	netlatMapDestinations      = "destinations"
 	netlatMapInFlight          = "in_flight"
 	netlatMapRecvSock          = "recv_sock"
 	netlatMapStats             = "stats"
+	netlatProgOnTcpClose       = "on_tcp_close"
 	netlatProgOnTcpRecvmsg     = "on_tcp_recvmsg"
 	netlatProgOnTcpRecvmsgRet  = "on_tcp_recvmsg_ret"
 	netlatProgOnTcpSendmsg     = "on_tcp_sendmsg"
@@ -103,6 +105,7 @@ type netlatSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type netlatProgramSpecs struct {
+	OnTcpClose      *ebpf.ProgramSpec `ebpf:"on_tcp_close"`
 	OnTcpRecvmsg    *ebpf.ProgramSpec `ebpf:"on_tcp_recvmsg"`
 	OnTcpRecvmsgRet *ebpf.ProgramSpec `ebpf:"on_tcp_recvmsg_ret"`
 	OnTcpSendmsg    *ebpf.ProgramSpec `ebpf:"on_tcp_sendmsg"`
@@ -112,6 +115,7 @@ type netlatProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type netlatMapSpecs struct {
+	BlankStats   *ebpf.MapSpec `ebpf:"blank_stats"`
 	Destinations *ebpf.MapSpec `ebpf:"destinations"`
 	InFlight     *ebpf.MapSpec `ebpf:"in_flight"`
 	RecvSock     *ebpf.MapSpec `ebpf:"recv_sock"`
@@ -148,6 +152,7 @@ func (o *netlatObjects) Close() error {
 //
 // It can be passed to loadNetlatObjects or ebpf.CollectionSpec.LoadAndAssign.
 type netlatMaps struct {
+	BlankStats   *ebpf.Map `ebpf:"blank_stats"`
 	Destinations *ebpf.Map `ebpf:"destinations"`
 	InFlight     *ebpf.Map `ebpf:"in_flight"`
 	RecvSock     *ebpf.Map `ebpf:"recv_sock"`
@@ -156,6 +161,7 @@ type netlatMaps struct {
 
 func (m *netlatMaps) Close() error {
 	return _NetlatClose(
+		m.BlankStats,
 		m.Destinations,
 		m.InFlight,
 		m.RecvSock,
@@ -177,6 +183,7 @@ type netlatVariables struct {
 //
 // It can be passed to loadNetlatObjects or ebpf.CollectionSpec.LoadAndAssign.
 type netlatPrograms struct {
+	OnTcpClose      *ebpf.Program `ebpf:"on_tcp_close"`
 	OnTcpRecvmsg    *ebpf.Program `ebpf:"on_tcp_recvmsg"`
 	OnTcpRecvmsgRet *ebpf.Program `ebpf:"on_tcp_recvmsg_ret"`
 	OnTcpSendmsg    *ebpf.Program `ebpf:"on_tcp_sendmsg"`
@@ -184,6 +191,7 @@ type netlatPrograms struct {
 
 func (p *netlatPrograms) Close() error {
 	return _NetlatClose(
+		p.OnTcpClose,
 		p.OnTcpRecvmsg,
 		p.OnTcpRecvmsgRet,
 		p.OnTcpSendmsg,

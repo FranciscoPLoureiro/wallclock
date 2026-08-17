@@ -91,16 +91,29 @@ struct in_flight {
 };
 
 /*
- * Latency to one destination, as a log2 histogram of microseconds plus the
- * totals a mean needs.
+ * Latency to one destination, as a histogram of microseconds plus the totals
+ * a mean needs.
  *
  * A histogram rather than a mean, because the mean of a latency distribution
  * is the one summary that hides the thing anybody is looking for. The totals
  * are kept beside it so the report can print a mean without walking the
  * buckets, and the maximum because a single worst case is often the reason
  * somebody opened the tool.
+ *
+ * Four buckets per octave rather than one. A plain log2 histogram is what bcc
+ * uses and it is too coarse to quote: a bucket spans a factor of two, so a
+ * real p50 of 41.5 ms is reported as
+ * "65.5 ms" -- 58% high, and high in the direction that makes somebody go
+ * looking for a problem that is not there. Splitting each octave in four
+ * bounds the overstatement at 25%.
+ *
+ * The cost is 128 counters per destination instead of 32, so a kilobyte per
+ * peer and four megabytes for a full map. That is cheap for a number people
+ * put in a graph.
  */
-#define MAX_SLOTS 32
+#define SUB_BITS 2
+#define SUB_BUCKETS (1 << SUB_BITS)
+#define MAX_SLOTS 128
 
 struct dest_stats {
 	__u64 count;
@@ -125,10 +138,18 @@ struct dest_stats {
  * because a connection does not move between threads even when the goroutine
  * using it does.
  *
- * A socket address can be reused after the socket is freed. An entry is
- * removed as soon as its answer arrives, so what can go stale is a request
- * that never got one -- and the destination is checked against the reply's
- * before anything is recorded.
+ * The key is an address the allocator reuses, which was left as an accepted
+ * risk in the first version and was not one: a reply sent on a connection
+ * that then closed left an entry behind, the address came back as somebody
+ * else's socket, and the next thing read on it was timed against a send from
+ * a conversation that had already ended. Against a server with keep-alives
+ * off it produced a report of twelve hundred destinations with multi-second
+ * "round trips", every one of them invented.
+ *
+ * Two things close it. The entry is removed when the socket is closed, so a
+ * reused address starts empty; and the reply's destination is checked against
+ * the request's before anything is recorded, so an address reused for a
+ * different peer inside the same window is caught as well.
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -154,6 +175,26 @@ struct {
 	__type(key, struct destination);
 	__type(value, struct dest_stats);
 } destinations SEC(".maps");
+
+/*
+ * A permanently zeroed dest_stats, used to create a new destination.
+ *
+ * The obvious `struct dest_stats fresh = {};` does not fit: a BPF program has
+ * 512 bytes of stack and this structure is a kilobyte once the histogram has
+ * four buckets to the octave. Widening the histogram is what broke it, and
+ * the compiler says so plainly -- "Looks like the BPF stack limit is
+ * exceeded" -- which is a better error than most.
+ *
+ * A per-CPU array is allocated zeroed by the kernel and nothing here ever
+ * writes to it, so it stays zeroed and can be handed straight to
+ * bpf_map_update_elem as the initial value.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct dest_stats);
+} blank_stats SEC(".maps");
 
 /* Counters, so that what could not be recorded is reported rather than
  * absorbed. Same reasoning as the offcpu program: a tool that silently drops
@@ -227,6 +268,28 @@ static __always_inline __u32 log2_64(__u64 v)
 	if (hi)
 		return 32 + log2_32(hi);
 	return log2_32((__u32)v);
+}
+
+/*
+ * Which bucket a duration in microseconds falls in.
+ *
+ * Below four microseconds each value gets its own bucket, because there is no
+ * mantissa left to split and no network answers that fast anyway. Above it,
+ * the octave picks the group of four and the two bits under the leading one
+ * pick which of the four.
+ */
+static __always_inline __u32 slot_for(__u64 us)
+{
+	if (us < SUB_BUCKETS)
+		return (__u32)us;
+
+	__u32 octave = log2_64(us);
+	__u32 sub = (__u32)(us >> (octave - SUB_BITS)) & (SUB_BUCKETS - 1);
+	__u32 slot = octave * SUB_BUCKETS + sub;
+
+	if (slot >= MAX_SLOTS)
+		slot = MAX_SLOTS - 1;
+	return slot;
 }
 
 static __always_inline void read_destination(struct sock *sk, struct destination *to)
@@ -315,12 +378,26 @@ int BPF_KRETPROBE(on_tcp_recvmsg_ret, int ret)
 
 	__u64 key = *sock;
 	struct in_flight *flight = bpf_map_lookup_elem(&in_flight, &key);
+	struct destination from = {};
+
+	/* The socket is still alive -- this is the return from a call that took
+	 * it as an argument -- so its peer can be read here and checked against
+	 * whoever the outstanding request went to. */
+	read_destination((struct sock *)(unsigned long)key, &from);
 
 	if (!flight) {
 		/* Data arrived on a connection nobody sent a request on -- a
 		 * server reading a request, or the second half of a reply
 		 * whose first half already closed the interval. Neither is an
 		 * error and neither is a measurement. */
+		bump(STAT_UNPAIRED);
+		return 0;
+	}
+	if (flight->to.daddr != from.daddr || flight->to.dport != from.dport) {
+		/* This address is holding a different socket than the one the
+		 * request went out on. Pairing them would invent a latency
+		 * between two unrelated conversations. */
+		bpf_map_delete_elem(&in_flight, &key);
 		bump(STAT_UNPAIRED);
 		return 0;
 	}
@@ -333,8 +410,13 @@ int BPF_KRETPROBE(on_tcp_recvmsg_ret, int ret)
 		struct dest_stats *stats_for = bpf_map_lookup_elem(&destinations, &key);
 
 		if (!stats_for) {
-			struct dest_stats fresh = {};
-			long err = bpf_map_update_elem(&destinations, &key, &fresh, BPF_NOEXIST);
+			__u32 zero = 0;
+			struct dest_stats *blank = bpf_map_lookup_elem(&blank_stats, &zero);
+
+			if (!blank)
+				goto done;
+
+			long err = bpf_map_update_elem(&destinations, &key, blank, BPF_NOEXIST);
 
 			/* -EEXIST is another CPU having created it a moment
 			 * ago, which is a race and not a full map. Counting it
@@ -354,18 +436,54 @@ int BPF_KRETPROBE(on_tcp_recvmsg_ret, int ret)
 		if (elapsed > stats_for->max_ns)
 			stats_for->max_ns = elapsed;
 
-		/* Microseconds, because a log2 histogram of nanoseconds spends
-		 * ten buckets on intervals no network can produce. */
-		__u32 slot = log2_64(elapsed / 1000);
+		/*
+		 * Microseconds, because a histogram of nanoseconds spends ten
+		 * octaves on intervals no network can produce.
+		 *
+		 * The index is masked rather than compared, and the verifier is
+		 * the reason. It refused two earlier versions of this line with
+		 * "R0 unbounded memory access, make sure to bounds check any
+		 * such access": clamping inside slot_for was not enough, and
+		 * neither was an if immediately before the access, because by
+		 * then clang has already folded the index into a pointer
+		 * addition it cannot follow the bound through. A mask against a
+		 * power-of-two size is provable by construction and needs no
+		 * reasoning at all -- which is the general lesson, since the
+		 * verifier does not fail when a bound is missing but when it
+		 * cannot see one.
+		 */
+		__u32 slot = slot_for(elapsed / 1000) & (MAX_SLOTS - 1);
 
-		if (slot >= MAX_SLOTS)
-			slot = MAX_SLOTS - 1;
 		__sync_fetch_and_add(&stats_for->slots[slot], 1);
 	}
 
 done:
 	/* The conversation is closed either way: leaving it open would pair
 	 * this thread's next reply with a request two exchanges old. */
+	bpf_map_delete_elem(&in_flight, &key);
+	return 0;
+}
+
+/*
+ * A connection ending, which is the only moment that can retire its entry
+ * safely.
+ *
+ * Without this the map keeps a request that never got an answer, keyed by an
+ * address the kernel is free to hand to the next socket. The next thing read
+ * on that address is then timed from a send that belongs to a conversation
+ * which has already finished. It is not a rare race: against a server with
+ * keep-alives off, where every connection is used once, it was most of the
+ * report.
+ */
+SEC("kprobe/tcp_close")
+int BPF_KPROBE(on_tcp_close, struct sock *sk)
+{
+	__u64 key = (__u64)(unsigned long)sk;
+
+	/* No cgroup filter here on purpose. A socket opened by a watched thread
+	 * can be closed by another, and an entry that outlives its socket is
+	 * exactly what this exists to prevent -- so the cheap delete runs
+	 * always rather than only when the closer happens to be in scope. */
 	bpf_map_delete_elem(&in_flight, &key);
 	return 0;
 }

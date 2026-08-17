@@ -28,6 +28,7 @@ usage:
   wallclock profile [flags]    split wall clock into on-CPU, runqueue and blocked
   wallclock validate [flags]   measure the tool against answers known in advance
   wallclock overhead [flags]   measure what the tool costs, against event rate
+  wallclock destinations [f]   time how long each destination takes to answer
 
 All of them exit non-zero on failure, so any can gate a build.
 `
@@ -57,6 +58,8 @@ func main() {
 		err = runSyscount(flag.Args()[1:])
 	case "validate":
 		err = runValidate(flag.Args()[1:])
+	case "destinations":
+		err = runDestinations(flag.Args()[1:])
 	case "overhead":
 		err = runOverhead(flag.Args()[1:])
 	default:
