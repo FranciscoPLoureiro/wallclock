@@ -1098,10 +1098,84 @@ opposite problems with opposite fixes, a bigger machine against a bigger
 limit. Running both does not fix it either: the windows do not coincide, the
 categories overlap, and neither closes to 100%.
 
-**Consequences.** This claim needs evidence, not assertion: the plan is to run
-`offcputime` and `runqlat` against the same process as wallclock and put the
-outputs side by side in this README. That belongs to phase 2, when there is an
-output to compare against, and it is a deliverable rather than an aside.
+**Evidence, because the claim is worthless without it.** `scripts/compare-tools.sh`
+puts two subjects on the machine and runs all three tools against them:
+`wc-capped`, a process spinning inside a cgroup allowed 20% of one CPU, and
+`wc-napper`, a process that falls asleep inside the window and is still asleep
+when it ends. Neither subject is chosen to flatter wallclock — the first is
+never blocked on anything at all, and the second is the case every off-CPU
+profiler was written for.
+
+```
+$ sudo WINDOW=12 sh scripts/compare-tools.sh
+
+=============================== wallclock ===============================
+   tid  observed    on-cpu   runqueue  throttled       blocked  unknown  command
+  4553     11.5s  0.0% 2ms  0.0% 81µs    0.0% 0s  100.0% 11.5s  0.0% 0s  wc-napper
+            sleep    100.0% 11.5s
+  4537  12.26s  20.1% 2.46s  0.4% 46.9ms  79.6% 9.75s  0.0% 0s  0.0% 0s  wc-capped
+
+=============================== offcputime ==============================
+wc-capped: 91 separate stacks, 9521774us off-CPU in total
+wc-napper: 0 stacks
+
+the largest single stack it reports for wc-capped:
+    schedule
+    exit_to_user_mode_prepare
+    irqentry_exit_to_user_mode
+    irqentry_exit
+    sysvec_hyperv_stimer0
+    asm_sysvec_hyperv_stimer0
+    -                wc-capped (4537)
+        399644
+
+================================ runqlat ===============================
+     usecs               : count     distribution
+        16 -> 31         : 107      |***********************************     |
+        32 -> 63         : 116      |**************************************  |
+        64 -> 127        : 5        |*                                       |
+       ... (empty)
+     65536 -> 131071     : 119      |****************************************|
+```
+
+**`offcputime` has the right number and the wrong story.** It charges
+`wc-capped` 9.52 s of off-CPU time, which agrees with wallclock's 9.75 s of
+throttling to within 3% — the two are looking at the same interval. But it
+splits that across **91 separate stacks**, every one of them bottoming out in
+`sysvec_hyperv_stimer0`: a timer interrupt. Read literally, it says this
+thread kept being preempted by the clock. The quota that actually stopped it
+is not in the output, because a stack cannot contain it — the reason a
+throttled thread is off a CPU is not on its stack, it is in a cgroup's
+accounting.
+
+**`offcputime` cannot see the sleeper at all.** Zero stacks for the thread
+that spent 11.5 of 12 seconds asleep. That is not a bug: it records an
+interval when the thread comes *back* on the CPU, and this one never did. So
+the longest wait in the window — the kind most worth finding — is the one it
+structurally cannot report. wallclock carries open waits deliberately, which
+is what `AttributeOpenWaits` is for, and it is why the sleeper is the first
+row of its table.
+
+**`runqlat` reports a healthy machine as a burning one.** The histogram is
+bimodal: a cluster at 16–63 µs, which is genuine runqueue latency, and **119
+samples between 65 ms and 131 ms**. On an idle sixteen-core host. Anybody
+shown that histogram concludes the machine is catastrophically oversubscribed;
+the truth is one cgroup with a 20% quota, and there is nothing in the output
+to tell those apart. It also never says *whose* latency any of it was.
+
+**And they cannot even be started together.** The script runs them one at a
+time because it has to: two bcc tools launched at once both read
+`/sys/kernel/kheaders.tar.xz` to compile against, and on this kernel that file
+does not take two readers — the loser dies with `Unable to find kernel
+headers` half way through the archive. Either works alone. That is a small
+thing and it is the composability argument in miniature: three tools, three
+windows, three vocabularies, and no way to add them up.
+
+**Consequences.** wallclock's decomposition is not a prettier `offcputime`. It
+answers a question neither of these can be made to answer — *which* of the
+four things a thread can be doing it was doing, in one closed account — and
+the two rows above are what that difference looks like on the same two
+processes.
 
 ### Where this is developed, and why not on Windows
 
