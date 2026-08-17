@@ -53,8 +53,8 @@ of them produce.
 | 0 | Environment, repository, CI that loads BPF into a real kernel | ✅ done |
 | 1 | First program end to end: map aggregation and a ring buffer path | ✅ done |
 | 2 | Off-CPU, runqueue delay, and cgroup throttling separated | ✅ done |
-| 3 | What the Go runtime makes invisible from the kernel's side | planned |
-| 4 | Network time attributed to individual destinations | planned |
+| 3 | What the Go runtime makes invisible from the kernel's side | ✅ done |
+| 4 | Network time attributed to individual destinations | planned — [phase 3 changed what it should be](#and-what-this-decided-about-phase-4) |
 | 5 | Validation against injected latency, and measured overhead | planned |
 | 6 | Point it at a real service and answer a real question | planned |
 
@@ -121,6 +121,41 @@ competing for the same cores. These threads never sleep, so their blocked
 column is zero and every one of them spends two thirds of its life *ready and
 waiting for a CPU*, which is the quantity a CPU profiler cannot see and an
 off-CPU profiler reports as indistinguishable from waiting on a socket.
+
+A real Go service, and the waiting that is not there. This is the
+[ticket office](https://github.com/FranciscoPLoureiro/HighConcurrencyTicketOffice)
+API taking 135 161 requests in forty seconds — 3 379 a second, a median of
+12.5 ms each — where every single request is at least one round trip to Redis,
+and many are round trips to PostgreSQL and RabbitMQ as well:
+
+```
+$ sudo wallclock profile -for 25s -processes -top 3 \
+    -cgroup /sys/fs/cgroup/docker/0348e2ea0fb9...
+watching every thread for 25s
+
+     pid  threads  thread-time        on-cpu    runqueue    throttled         blocked  unknown  command
+  359631        6      2m8.53s  33.5% 43.12s  0.6% 743ms   0.2% 201ms  65.7% 1m24.47s  0.0% 0s  api *
+  360971        9      318.7ms  16.7% 53.2ms  1.5% 4.7ms  3.2% 10.2ms   78.6% 250.5ms  0.0% 0s  api (9 of 9 exited) *
+  360778        9      315.8ms  16.4% 51.7ms    1.3% 4ms    6.0% 19ms   76.4% 241.2ms  0.0% 0s  api (9 of 9 exited)
+
+api (359631, 0s on sockets), api (360971, 543µs on sockets) run a rotating event loop:
+their threads take turns in one and none of them is dedicated to it, so no thread in
+them is "the netpoller". Most of their blocked time above is an idle thread pool
+rather than the process waiting for anything, and what they show on sockets is not
+how long they waited on the network -- their goroutines wait in a place where no
+thread ever stops. See "the Go execution model" in the README.
+
+51 threads observed
+every decomposition sums to 100% of the time observed
+```
+
+**Eighty-four seconds blocked, and zero of it on a socket.** A service doing
+three thousand round trips a second to three different network dependencies
+recorded no network waiting at all, and that is not a bug in either of them.
+It is the single most important thing this tool has to say about Go, it is
+[measured against a control](#the-go-execution-model-and-what-it-hides-from-the-kernel)
+rather than asserted, and it is why the report says so in prose underneath the
+table instead of leaving a reader to conclude that the network is fast.
 
 Syscall entries per process, counted inside the kernel, filtered inside the
 kernel, with what was thrown away reported rather than assumed:
@@ -472,6 +507,198 @@ that way the failure inverts and becomes honest — an interval that completes
 between the two reads is in neither, so it goes unattributed and says so. A
 test asserts on every run that no thread is ever over-attributed, because the
 two calls look interchangeable and are not.
+
+### The Go execution model, and what it hides from the kernel
+
+**Context.** The kernel does not know what a goroutine is. It schedules
+threads, and Go multiplexes thousands of goroutines onto a handful of them.
+When a goroutine waits on a socket the runtime registers the descriptor with
+an epoll instance, parks the goroutine, and the OS thread picks up another one
+immediately. Nothing waits. There is no thread stopped on that socket for this
+tool to find, because from the kernel's side nothing happened.
+
+That is a claim about a negative, and a negative measured with one instrument
+is worthless: *"wallclock reports no network waiting in this Go service"* and
+*"wallclock cannot see network waiting"* produce identical output. So it is
+measured against a control.
+
+**The measurement.** The same binary does the same eight seconds of waiting
+twice, against the same server, which holds every request for the same 40 ms.
+Once through `net/http`, where the runtime owns the descriptor. Once through
+raw blocking `read()` on a socket the runtime has never touched, on threads
+pinned with `LockOSThread` so that the thread really is the thing that stops.
+Three consecutive runs:
+
+| who does the waiting | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| goroutines, through the netpoller | **0s** | **1ms** | **0s** |
+| OS threads, blocking on the socket | 8.263s | 8.227s | 8.220s |
+
+The injected delay totals 8s, so the control is within 2.8% of ground truth
+and the netpoller run is empty. The control is what makes the empty column a
+fact about Go rather than a fact about this profiler, and it runs on every
+`make smoke` and in CI, in `internal/offcpu/netpoll_test.go`.
+
+Total blocked time is about the same in both windows — roughly 22 seconds
+across roughly eighteen threads either way. Nothing waits less. What moves is
+which column the waiting is filed under.
+
+**There is no netpoller thread to label.** Phase 3 was specified as detecting
+and labelling the netpoller threads. The first thing measuring it turned up is
+that there are none. A Go service with sixteen concurrent clients, profiled
+for ten seconds: all nineteen of its threads reported the same thing to within
+a percentage point — about 90% of blocked time in futex, 5 to 7% in the
+poller, under a millisecond on sockets. Not one of them was the netpoller;
+every one of them was the netpoller sometimes. Go does not name its threads
+either, so all nineteen carry the binary's name and nothing visible from the
+kernel tells one M from another.
+
+So the label moved from the thread to the process, which is where phase 3
+decided honest scope lies anyway. A process is called a *rotating* event loop
+when polling is a role passed around interchangeable threads rather than the
+job of any one of them — and the criterion for that is not the obvious one.
+The obvious one is the share of the polling the busiest thread holds. It is
+wrong, because it measures the size of the machine:
+
+| GOMAXPROCS | threads polling | busiest share | share done by dedicated threads |
+|---|---|---|---|
+| 16 | 16 of 18 | 22.4% | 0% |
+| 4 | 6 of 8 | 35.3% | 0% |
+| 2 | 3 of 5 | 50.5% | 0% |
+
+Fewer processors mean fewer threads to rotate through, so each holds more of
+an unchanged rotation, and at two a plainly rotating runtime crosses a
+half-way threshold. What does not move is how dedicated a thread is: a thread
+that *is* an event loop waits almost only in the loop, and a Go M waits 5 to
+7% there and the rest parked in futex whether there are three of it or
+nineteen. That is the last column, zero across the range, with the whole
+threshold as margin.
+
+The thread-level label still exists, because sometimes a thread really is the
+poller — and then it is marked, so its blocked share is not read as a slow
+dependency. Redis, in the same stack, under the same load:
+
+```
+  192104  25.27s  79.1% 19.99s  0.9% 227.6ms  5.8% 1.47s  14.1% 3.57s  0.0% 0s  redis-server [event loop]
+            poll     13.6% 3.44s
+            disk     0.5% 130.2ms
+```
+
+**The one category that still lies.** What a Go thread genuinely blocks on is
+futex — channels, mutexes, GC assists and the scheduler parking idle Ms — plus
+regular file I/O, which cannot be polled, plus cgo. Of those, futex is
+ambiguous in a way the kernel cannot resolve: an M parked in `notesleep`
+waiting to be given work and a goroutine stopped on a contended mutex are the
+same `futex_wait` on an address the kernel has no way to interpret. The
+experiment above is consistent with most of it being the first kind — roughly
+eight seconds moved *out* of futex and into network when the same waiting was
+done by threads instead of goroutines — but the tool cannot tell you which
+kind you have, and says so rather than reporting an idle thread pool as lock
+contention.
+
+**Options.**
+
+*A — honest scope at the level of the process.* Report per thread and per
+process, document that Go's network waiting appears as threads in the poller,
+and measure the categories that are real in that model: runqueue delay,
+throttling, futex, disk.
+
+*B — goroutine identity through a uprobe.* On amd64 with the register ABI from
+Go 1.17, the `g` pointer is in R14, and a uprobe can read it and extract the
+`goid`. The cautions are serious and none of them is hypothetical: `uretprobe`
+on Go is dangerous because it works by rewriting the return address, and
+goroutine stacks move when they grow; the offset of `goid` within `g` depends
+on the Go version; and every part of it breaks silently on a runtime upgrade —
+silently being the operative word, since a wrong offset yields a plausible
+integer rather than an error.
+
+*C — instrument the application to publish context.* The application writes a
+request id into a shared BPF map. Correlation becomes perfect, at the cost of
+no longer being a tool that works without instrumentation, which is the
+premise of the project. **Refused on that ground alone.** It is not that it
+would not work; it is that it answers a different question — if the
+application can be changed, `net/http/pprof` and OpenTelemetry already exist,
+are better at it, and do not need a kernel.
+
+**Decision.** A, implemented. B is not implemented and the analysis above is
+the deliverable: the value was in establishing *why* it is fragile, and it is
+the first thing to cut.
+
+**Consequences.** There are questions this tool cannot answer about a Go
+process, and it now names them instead of answering them wrongly:
+
+- *"How long did this service wait on the network?"* — not answerable from the
+  kernel. The waiting is real and no thread does it.
+- *"Which thread is the netpoller?"* — no such thread. The role rotates.
+- *"It is 96% blocked, is that bad?"* — that is a statement about a thread
+  pool, not about latency. Idle threads are blocked threads, and a process
+  with sixteen mostly-idle threads reports the same 96% whether it served a
+  million requests or none. The per-process view calls the column
+  `thread-time` for this reason.
+- *"Is that futex time lock contention?"* — unknown, and unknowable from here.
+
+What it does answer, for Go and everything else: on-CPU time, runqueue delay,
+cgroup throttling, disk, and how many threads a runtime is actually keeping
+busy.
+
+#### And what this decided about phase 4
+
+Phase 4 was specified as attributing blocked network time to individual
+destinations, with the scope note — written before any of this was measured —
+that its target would be PostgreSQL and Redis, *"processes that really do
+block threads on sockets"*, rather than the Go client. **That premise is
+wrong, and the same window that proved the Go half disproves it.**
+
+PostgreSQL backends do not block on sockets either. Waiting for the next query
+from a pooled client, they sit in `epoll_wait`, and this tool marks every one
+of them as an event loop:
+
+```
+  192528    25.25s  0.0% 5.2ms  0.0% 3ms    0.0% 0s  100.0% 25.24s  0.0% 0s  postgres [event loop]
+            poll     99.5% 25.12s
+            disk     0.5% 117ms
+```
+
+Redis is one thread in `aeMain`, which is the same picture. Across the *whole
+machine* during a 25-second window with the stack under load — about eighty
+thousand HTTP requests, each with at least one Redis round trip — six threads
+in total recorded any network-blocked time at all:
+
+| thread | network blocked |
+|---|---|
+| `dockerd` | 82.6 ms |
+| `runc` (exited) | 44.6 ms |
+| `runc` (exited) | 36.4 ms |
+| `rabbitmq-diagno` (exited) | 401 µs |
+| `k6` (exited) | 135 µs |
+| `k6` (exited) | 110 µs |
+
+Roughly 164 ms, all of it in short-lived one-shot clients — a container
+runtime, a health check, threads of a load generator on their way out. **Not
+one service.** Modern server software does not block threads on sockets; it
+waits in an event loop, whether it is written in Go, C or Erlang.
+
+So phase 4 as specified would have built a join with almost nothing to join.
+The kprobes on `tcp_sendmsg` and `tcp_recvmsg` still fire — every socket
+operation goes through them, blocking or not — and the TID-to-destination map
+still fills. What is empty is the *blocked* time it was supposed to be
+attributed to.
+
+The decision, then, is that phase 4 is worth building and is not worth
+building as written. It is reframed from *"split blocked network time by
+destination"*, which is nearly always zero, to *"measure the time between a
+send to a destination and the next receive from it, per thread"* — which
+requires no thread to block, works for Go, PostgreSQL, Redis and the
+synthetic case alike, and answers the question the phase was actually asked:
+*waiting for whom?* The integration test with two servers at two known delays
+still validates it, and the CO-RE reasoning about `skc_daddr` offsets is
+unchanged. What changes is where the number comes from, and that phase 4 now
+has to be validated against something other than blocked time, because blocked
+time is not where the answer lives.
+
+That reframing is not a rescue of a phase that failed. It is the phase before
+it doing its job: phase 3 was placed ahead of phase 4 precisely so that a week
+would not be spent building the wrong thing, and it was.
 
 ### Blocked time and runqueue delay are different numbers
 

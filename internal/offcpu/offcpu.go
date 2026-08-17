@@ -50,6 +50,16 @@ type Thread struct {
 	// which inside a container is not the number /proc shows. See the pidns
 	// package.
 	TID uint32
+	// TGID is the process the thread belongs to -- the thread group id,
+	// which for the group leader equals its TID. Numbered by the initial pid
+	// namespace, exactly like TID, so it is a key to group by and not a
+	// number to look up in this process's /proc.
+	//
+	// Zero means no event that could answer has been seen for this thread
+	// yet. It is left at zero rather than guessed: a thread filed under the
+	// wrong process is worse than a thread filed under none, because the
+	// first is invisible and the second is not.
+	TGID uint32
 	// Exited reports that the thread was gone by the time this was read, so
 	// its numbers are final and its observation window closed when it died
 	// rather than when the report was produced. Short-lived work is real
@@ -394,6 +404,7 @@ func (s *Session) Threads() ([]Thread, error) {
 		t := Thread{
 			OpenBlockedStack: noStack,
 			TID:              raw.Tid,
+			TGID:             raw.Tgid,
 			Comm:             commToString(raw.Comm),
 			CgroupID:         raw.CgroupId,
 			OnCPU:            time.Duration(raw.OnCpuNs),     //nolint:gosec // ns since boot, signed after 292 years
