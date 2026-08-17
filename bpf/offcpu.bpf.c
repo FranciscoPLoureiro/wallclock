@@ -599,6 +599,19 @@ static __always_inline void transition(__u32 tid, __u32 tgid, const char *comm,
 		 */
 		struct thread fresh = {};
 		start_fresh(&fresh, tid, tgid, comm, next_state, now);
+		/*
+		 * The stack this thread is stopping on, if it is stopping.
+		 *
+		 * start_fresh clears it, which is right for every other initial
+		 * state and wrong for this one: a thread whose *first* observed
+		 * event is going to sleep would have that wait counted with no
+		 * reason attached to it. Found by the phase 5 network scenario,
+		 * where the subject is named, pinned, and then immediately blocks
+		 * in connect() -- so its first sight is a switch-out, and exactly
+		 * one round trip of the twenty-six came back unattributed. The
+		 * time was never lost; only the explanation was.
+		 */
+		fresh.block_stack_id = next_state == STATE_BLOCKED ? stack_id : -1;
 		long err = bpf_map_update_elem(&threads, &tid, &fresh, BPF_NOEXIST);
 		/* -EEXIST means another CPU saw this thread first, which is a
 		 * race and not a full map. There is nothing to credit on a
@@ -615,6 +628,12 @@ static __always_inline void transition(__u32 tid, __u32 tgid, const char *comm,
 		if (arrival != ARRIVAL_NEW)
 			return;
 		start_fresh(t, tid, tgid, comm, next_state, now);
+		/* Same reason as above: a reused tid whose first act is to block
+		 * keeps the reason for that first wait. ARRIVAL_NEW comes from
+		 * wakeup_new, which carries no stack, so in practice this stores
+		 * the -1 it would have anyway -- it is here so that the two
+		 * start_fresh calls cannot drift apart. */
+		t->block_stack_id = next_state == STATE_BLOCKED ? stack_id : -1;
 		return;
 	}
 
