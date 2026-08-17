@@ -9,7 +9,9 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/FranciscoPLoureiro/wallclock/internal/ksyms"
 	"github.com/FranciscoPLoureiro/wallclock/internal/offcpu"
+	"github.com/FranciscoPLoureiro/wallclock/internal/syscount"
 )
 
 const profileUsage = `wallclock profile - split wall clock into on-CPU, runqueue and blocked
@@ -22,19 +24,40 @@ flags:
   -for DURATION   how long to observe (default 10s)
   -top N          how many threads to show, busiest first (default 15)
   -comm SUBSTRING only threads whose name contains this
+  -cgroup PATH    only threads in this cgroup, e.g. a container directory
+                  under /sys/fs/cgroup
+  -reasons        break blocked time down by what was being waited for
+  -folded FILE    write off-CPU folded stacks for flamegraph.pl
 `
 
 func runProfile(args []string) error {
 	fs := flag.NewFlagSet("profile", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, profileUsage) }
 	var (
-		pid    = fs.Int("pid", 0, "")
-		window = fs.Duration("for", 10*time.Second, "")
-		top    = fs.Int("top", 15, "")
-		comm   = fs.String("comm", "", "")
+		pid     = fs.Int("pid", 0, "")
+		window  = fs.Duration("for", 10*time.Second, "")
+		top     = fs.Int("top", 15, "")
+		comm    = fs.String("comm", "", "")
+		cgroup  = fs.String("cgroup", "", "")
+		reasons = fs.Bool("reasons", false, "")
+		folded  = fs.String("folded", "", "")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// A cgroup is named by a path and matched by the id the kernel gives it.
+	// Unlike a pid that id means the same thing inside a container and out,
+	// which makes this the one filter that works from anywhere -- and the
+	// answer to the namespace problem that has turned up at every stage of
+	// this project.
+	var cgroupID uint64
+	if *cgroup != "" {
+		id, err := syscount.CgroupIDOf(*cgroup)
+		if err != nil {
+			return err
+		}
+		cgroupID = id
 	}
 
 	session, err := offcpu.Open(*pid)
@@ -57,9 +80,33 @@ func runProfile(args []string) error {
 		return err
 	}
 
+	// Reasons before the thread totals, and the order is load bearing: a wait
+	// that is open when the totals are read can end a moment later, and the
+	// kernel then files it as a completed row. Reading the rows second counts
+	// that interval twice. See BlockedReasons.
+	var (
+		blocked []offcpu.Blocked
+		symbols *ksyms.Table
+	)
+	wantReasons := *reasons || *folded != ""
+	if wantReasons {
+		var err error
+		if symbols, err = ksyms.Load(); err != nil {
+			return fmt.Errorf("naming kernel stacks: %w", err)
+		}
+		if blocked, err = session.BlockedReasons(symbols); err != nil {
+			return err
+		}
+	}
+
 	threads, err := session.Threads()
 	if err != nil {
 		return err
+	}
+	if wantReasons {
+		if blocked, err = session.AttributeOpenWaits(blocked, threads, symbols); err != nil {
+			return err
+		}
 	}
 	// The two empty cases are reported separately. "Nothing matched your
 	// filter" and "the tool saw nothing at all" look identical in a report
@@ -70,6 +117,17 @@ func runProfile(args []string) error {
 	if observed == 0 {
 		fmt.Fprintln(os.Stdout, "no threads were observed at all")
 		return reportProfileDrops(session)
+	}
+	if cgroupID != 0 {
+		threads = filterByCgroup(threads, cgroupID)
+		if len(threads) == 0 {
+			fmt.Fprintf(os.Stdout,
+				"%d threads were observed, none in %s (cgroup id %d). A thread is "+
+					"placed in its cgroup the first time it is seen leaving a CPU, "+
+					"so one that never ran during the window is not there yet.\n",
+				observed, *cgroup, cgroupID)
+			return reportProfileDrops(session)
+		}
 	}
 	if *comm != "" {
 		threads = filterByComm(threads, *comm)
@@ -93,7 +151,7 @@ func runProfile(args []string) error {
 	})
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(w, "tid\tobserved\ton-cpu\trunqueue\tblocked\tunknown\t  command")
+	fmt.Fprintln(w, "tid\tobserved\ton-cpu\trunqueue\tthrottled\tblocked\tunknown\t  command")
 	exited := 0
 	for i, t := range threads {
 		if t.Exited {
@@ -110,17 +168,39 @@ func runProfile(args []string) error {
 		if t.Exited {
 			name += " (exited)"
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t  %s\n",
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t  %s\n",
 			t.TID,
 			round(t.Observed),
 			percentOf(t.OnCPU, t.Observed),
 			percentOf(t.Runqueue, t.Observed),
+			percentOf(t.Throttled, t.Observed),
 			percentOf(t.Blocked, t.Observed),
 			percentOf(t.Unknown, t.Observed),
 			name)
+		if *reasons {
+			// Flushed per thread so the breakdown lands under its own row:
+			// tabwriter buffers until it can align a block, and the reason
+			// lines are not part of that block.
+			if err := w.Flush(); err != nil {
+				return err
+			}
+			writeReasons(os.Stdout, blocked, t)
+		}
 	}
 	if err := w.Flush(); err != nil {
 		return err
+	}
+
+	if *folded != "" {
+		file, err := os.Create(*folded)
+		if err != nil {
+			return fmt.Errorf("creating the folded stack file: %w", err)
+		}
+		defer file.Close()
+		if err := writeFolded(file, blocked, threads); err != nil {
+			return fmt.Errorf("writing folded stacks: %w", err)
+		}
+		fmt.Fprintf(os.Stdout, "\nfolded off-CPU stacks written to %s\n", *folded)
 	}
 
 	fmt.Fprintf(os.Stdout, "\n%d threads observed", len(threads))
@@ -137,6 +217,16 @@ func runProfile(args []string) error {
 	// did, which is the failure this whole project is arranged against.
 	reportResiduals(threads)
 	return reportProfileDrops(session)
+}
+
+func filterByCgroup(threads []offcpu.Thread, id uint64) []offcpu.Thread {
+	var kept []offcpu.Thread
+	for _, t := range threads {
+		if t.CgroupID == id {
+			kept = append(kept, t)
+		}
+	}
+	return kept
 }
 
 func filterByComm(threads []offcpu.Thread, substring string) []offcpu.Thread {
@@ -220,6 +310,12 @@ func reportProfileDrops(session *offcpu.Session) error {
 		fmt.Fprintf(os.Stdout,
 			"LOST %d newly created threads of the target: the target set is full\n",
 			drops.TargetsFull)
+	}
+	if drops.CgroupsFull > 0 {
+		fmt.Fprintf(os.Stdout,
+			"LOST the throttling of %d cgroups: that map is at max_entries, so their "+
+				"threads' waits are filed as ordinary runqueue delay -- the two "+
+				"categories this tool exists to separate, merged again\n", drops.CgroupsFull)
 	}
 	return nil
 }

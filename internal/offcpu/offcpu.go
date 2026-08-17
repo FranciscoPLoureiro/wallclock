@@ -26,7 +26,11 @@ import (
 	"github.com/FranciscoPLoureiro/wallclock/internal/pidns"
 )
 
-//go:generate go tool bpf2go -target bpfel -type thread -type stat_slot offcpu ../../bpf/offcpu.bpf.c -- -D__TARGET_ARCH_x86 -I/usr/include/x86_64-linux-gnu
+//go:generate go tool bpf2go -target bpfel -type thread -type stat_slot -type blocked_key offcpu ../../bpf/offcpu.bpf.c -- -D__TARGET_ARCH_x86 -I/usr/include/x86_64-linux-gnu
+
+// noStack is the absence of a captured stack, matching the -1 the BPF program
+// stores. Zero is a stack id the kernel really returns.
+const noStack int32 = -1
 
 // State is what a thread was doing.
 type State uint32
@@ -64,9 +68,37 @@ type Thread struct {
 	// attribute time that was never measured.
 	Observed time.Duration
 
-	OnCPU    time.Duration
+	OnCPU time.Duration
+	// Runqueue is time spent ready with no CPU free to run on.
 	Runqueue time.Duration
-	Blocked  time.Duration
+	// Throttled is time spent ready on a machine that had a CPU free, with
+	// the cgroup's own quota forbidding its use.
+	//
+	// Both are a thread that is ready and not running, and from outside they
+	// are the same thing. They are opposite problems: the first says buy a
+	// bigger machine, the second says raise a limit -- and a tool that
+	// reports them as one number is how a team buys hardware it did not
+	// need. Separating them is the reason this project exists.
+	Throttled time.Duration
+	Blocked   time.Duration
+	// CgroupID is the cgroup the thread was last seen in, as the kernel
+	// numbers it, or zero if it has not been observed leaving a CPU yet.
+	// Unlike a pid this means the same thing inside a container and out.
+	CgroupID uint64
+
+	// OpenBlocked is the part of Blocked that has not ended yet: the thread
+	// is still waiting as this is read. OpenBlockedStack is the stack it is
+	// waiting on, or negative if none was captured.
+	//
+	// These exist because a reason is filed when a wait *ends*, and a thread
+	// blocked for the whole window never ends one. Without them, the threads
+	// that spent the most time waiting -- exactly the ones worth looking
+	// at -- are the ones whose reason reads "unattributed".
+	OpenBlocked time.Duration
+	// OpenBlockedStack is negative when there is none. Zero is a stack id
+	// the kernel really returns, so it cannot double as the unset value --
+	// the kernel side uses -1 for the same reason.
+	OpenBlockedStack int32
 	// Unknown is time the thread spent in a state this tool could not name.
 	// It should be zero, and it is accumulated in the kernel rather than
 	// merely displayed, so that it can actually become non-zero: a state
@@ -89,7 +121,7 @@ const ReadSkewTolerance = 1 * time.Millisecond
 // Observed. It is computed rather than assumed so that the report can show
 // the two side by side and the reader can see the books balance.
 func (t Thread) Accounted() time.Duration {
-	return t.OnCPU + t.Runqueue + t.Blocked + t.Unknown
+	return t.OnCPU + t.Runqueue + t.Throttled + t.Blocked + t.Unknown
 }
 
 // Residual is what the categories failed to account for. Zero means the
@@ -111,10 +143,25 @@ type Drops struct {
 	// added to the target set, so their time was never collected. This one
 	// really is a thread count: there is one fork per thread.
 	TargetsFull uint64
+	// CgroupsFull counts cgroups whose throttling could not be recorded
+	// because that map was at max_entries. Their threads' waits are then
+	// filed as ordinary runqueue delay -- the two categories this phase
+	// exists to separate, silently merged again -- so it is reported rather
+	// than absorbed.
+	CgroupsFull uint64
+	// StacksLost counts blocked intervals whose reason could not be
+	// recorded, because the stack could not be captured or its total could
+	// not be stored. That time still appears in the thread total; what is
+	// missing is what it was waiting for, and the report says so rather than
+	// filing it under "other" as though that were an answer.
+	StacksLost uint64
 }
 
 // Any reports whether anything was lost.
-func (d Drops) Any() bool { return d.EventsDropped > 0 || d.TargetsFull > 0 }
+func (d Drops) Any() bool {
+	return d.EventsDropped > 0 || d.TargetsFull > 0 ||
+		d.CgroupsFull > 0 || d.StacksLost > 0
+}
 
 // Session owns the loaded programs, their maps and the attachments.
 type Session struct {
@@ -190,12 +237,38 @@ func Open(targetPID int) (_ *Session, err error) {
 		{"sched_process_exit", s.objs.OnSchedProcessExit},
 		{"sched_process_fork", s.objs.OnSchedProcessFork},
 	} {
-		l, err := link.AttachRawTracepoint(link.RawTracepointOptions{
+		// Assigned to the named return, not declared with :=. The deferred
+		// cleanup above reads that variable, and a shadowed copy leaves it
+		// nil -- so a failure here would return an error and leak the
+		// programs, the maps and every link already attached.
+		l, attachErr := link.AttachRawTracepoint(link.RawTracepointOptions{
 			Name:    raw.name,
 			Program: raw.program,
 		})
-		if err != nil {
-			return nil, fmt.Errorf("attach to the raw %s tracepoint: %w", raw.name, err)
+		if attachErr != nil {
+			err = fmt.Errorf("attach to the raw %s tracepoint: %w", raw.name, attachErr)
+			return nil, err
+		}
+		s.links = append(s.links, l)
+	}
+
+	// The throttling probes go on before the scheduler tracepoints, for the
+	// same reason exit does: a thread joining the runqueue reads the
+	// cgroup's throttled total as its baseline, and a baseline taken before
+	// these are watching reads zero for a cgroup that is already throttled.
+	// The wait would then be filed as ordinary runqueue delay -- the exact
+	// confusion this phase exists to remove.
+	for _, probe := range []struct {
+		symbol  string
+		program *ebpf.Program
+	}{
+		{"throttle_cfs_rq", s.objs.OnThrottleCfsRq},
+		{"unthrottle_cfs_rq", s.objs.OnUnthrottleCfsRq},
+	} {
+		l, attachErr := link.Kprobe(probe.symbol, probe.program, nil)
+		if attachErr != nil {
+			err = fmt.Errorf("attach a kprobe to %s: %w", probe.symbol, attachErr)
+			return nil, err
 		}
 		s.links = append(s.links, l)
 	}
@@ -208,9 +281,10 @@ func Open(targetPID int) (_ *Session, err error) {
 		{"sched_wakeup", s.objs.OnSchedWakeup},
 		{"sched_wakeup_new", s.objs.OnSchedWakeupNew},
 	} {
-		l, err := link.Tracepoint("sched", attachment.name, attachment.program, nil)
-		if err != nil {
-			return nil, fmt.Errorf("attach to sched:%s: %w", attachment.name, err)
+		l, attachErr := link.Tracepoint("sched", attachment.name, attachment.program, nil)
+		if attachErr != nil {
+			err = fmt.Errorf("attach to sched:%s: %w", attachment.name, attachErr)
+			return nil, err
 		}
 		s.links = append(s.links, l)
 	}
@@ -318,12 +392,15 @@ func (s *Session) Threads() ([]Thread, error) {
 			return nil, err
 		}
 		t := Thread{
-			TID:      raw.Tid,
-			Comm:     commToString(raw.Comm),
-			OnCPU:    time.Duration(raw.OnCpuNs),    //nolint:gosec // ns since boot, signed after 292 years
-			Runqueue: time.Duration(raw.RunqueueNs), //nolint:gosec // as above
-			Blocked:  time.Duration(raw.BlockedNs),  //nolint:gosec // as above
-			Unknown:  time.Duration(raw.UnknownNs),  //nolint:gosec // as above
+			OpenBlockedStack: noStack,
+			TID:              raw.Tid,
+			Comm:             commToString(raw.Comm),
+			CgroupID:         raw.CgroupId,
+			OnCPU:            time.Duration(raw.OnCpuNs),     //nolint:gosec // ns since boot, signed after 292 years
+			Runqueue:         time.Duration(raw.RunqueueNs),  //nolint:gosec // as above
+			Throttled:        time.Duration(raw.ThrottledNs), //nolint:gosec // as above
+			Blocked:          time.Duration(raw.BlockedNs),   //nolint:gosec // as above
+			Unknown:          time.Duration(raw.UnknownNs),   //nolint:gosec // as above
 		}
 
 		if State(raw.State) == StateExited {
@@ -346,9 +423,17 @@ func (s *Session) Threads() ([]Thread, error) {
 			case StateOnCPU:
 				t.OnCPU += current
 			case StateRunqueue:
+				// Credited whole to runqueue rather than split. The
+				// kernel does the splitting when the wait ends, and
+				// this wait has not ended: the thread is still queued
+				// as the report is being written. Splitting it here
+				// would mean reimplementing the same arithmetic in a
+				// second place against a snapshot userspace cannot see.
 				t.Runqueue += current
 			case StateBlocked:
 				t.Blocked += current
+				t.OpenBlocked = current
+				t.OpenBlockedStack = raw.BlockStackId
 			case StateUnknown, StateExited:
 				t.Unknown += current
 			}
@@ -379,6 +464,8 @@ func (s *Session) Drops() (Drops, error) {
 	}{
 		{offcpuStatSlotSTAT_EVENTS_DROPPED, &d.EventsDropped},
 		{offcpuStatSlotSTAT_TARGETS_FULL, &d.TargetsFull},
+		{offcpuStatSlotSTAT_CGROUPS_FULL, &d.CgroupsFull},
+		{offcpuStatSlotSTAT_STACKS_LOST, &d.StacksLost},
 	} {
 		if err := s.objs.Stats.Lookup(uint32(slot.index), slot.into); err != nil {
 			return Drops{}, fmt.Errorf("read drop counter %d: %w", slot.index, err)

@@ -112,6 +112,13 @@ func Explain(err error) string {
 
 // Program returns a loaded program by the name of its C function.
 func (l *Loaded) Program(name string) (*ebpf.Program, error) {
+	// Checked rather than assumed, because Close nils the collection and a
+	// lookup afterwards would dereference it. Every other method on this type
+	// tolerates being called on a closed value; a profiler that panics loses
+	// the run it was in the middle of.
+	if l == nil || l.coll == nil {
+		return nil, errors.New("this object has been closed")
+	}
 	prog, ok := l.coll.Programs[name]
 	if !ok {
 		return nil, fmt.Errorf("no program named %q in this object", name)

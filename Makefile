@@ -144,6 +144,25 @@ smoke: bpf build ## Run every test that needs a real kernel (needs root)
 	$(SUDO) $(BIN) load $(firstword $(BPF_OBJ))
 	$(SUDO) $(BIN) load $(firstword $(BPF_OBJ))
 
+FLAME_WINDOW ?= 20s
+
+.PHONY: flamegraph
+flamegraph: build ## Record off-CPU stacks and render a flame graph (needs root)
+	# An off-CPU flame graph, not the usual kind: the width of a frame is not
+	# how long that code ran, it is how long a thread sat still inside it.
+	@mkdir -p docs
+	$(SUDO) $(BIN) profile -for $(FLAME_WINDOW) -folded build/offcpu.folded
+	@if command -v flamegraph.pl >/dev/null 2>&1; then \
+		flamegraph.pl --title "wallclock: off-CPU" --countname us --colors io \
+			build/offcpu.folded > docs/offcpu-flamegraph.svg; \
+		echo "wrote docs/offcpu-flamegraph.svg"; \
+	else \
+		echo; \
+		echo "build/offcpu.folded is ready. flamegraph.pl is not on PATH; it is a"; \
+		echo "single Perl script from github.com/brendangregg/FlameGraph:"; \
+		echo "  flamegraph.pl --countname us build/offcpu.folded > docs/offcpu-flamegraph.svg"; \
+	fi
+
 .PHONY: clean
 clean: ## Remove build outputs
 	rm -rf build bin
