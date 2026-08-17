@@ -1,0 +1,66 @@
+{
+  "uid": "wallclock-destinations",
+  "title": "wallclock: who the waiting was for",
+  "description": "Per-destination round-trip latency, measured from a send on a connection to the first bytes back on it. No thread has to block for this to be recorded, which is why it works against a Go service. Point the exporter at one cgroup -- `wallclock destinations -cgroup ... -serve :9500` -- or every connection on the machine ends up here.",
+  "tags": ["wallclock", "ebpf"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "p99 round trip, by destination",
+      "description": "histogram_quantile over the buckets, which are ceilings with four buckets to the octave -- so a value is 'at or below', never an interpolation. Restricted to destinations doing more than one exchange a second: below that the interval measured is a peer's think time rather than a round trip, and one idle keep-alive at two minutes flattens every real series to zero.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 5 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (name, destination, le) (rate(wallclock_destination_latency_seconds_bucket[1m]))) and on (destination) (sum by (destination) (rate(wallclock_destination_latency_seconds_count[1m])) > 1)",
+          "legendFormat": "{{name}} {{destination}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "mean round trip, by destination",
+      "description": "Sum over count, so this one is exact rather than read off the histogram. Same traffic floor as the p99 panel.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 5 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "(sum by (name, destination) (rate(wallclock_destination_latency_seconds_sum[1m])) / sum by (name, destination) (rate(wallclock_destination_latency_seconds_count[1m]))) and on (destination) (sum by (destination) (rate(wallclock_destination_latency_seconds_count[1m])) > 1)",
+          "legendFormat": "{{name}} {{destination}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "completed exchanges per second",
+      "description": "How much conversation there is with each peer. A destination with a high latency and two exchanges a second is a different problem from one with a low latency and ten thousand -- which is why this panel is unfiltered.",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (name, destination) (rate(wallclock_destination_latency_seconds_count[1m]))",
+          "legendFormat": "{{name}} {{destination}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

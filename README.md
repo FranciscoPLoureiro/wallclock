@@ -783,6 +783,40 @@ clients still shows them. The way to get a clean answer is to attach first and
 start the traffic afterwards, which is how the measurement above was taken —
 on the second attempt.
 
+### The histograms, in Grafana
+
+`wallclock destinations -serve :9500` publishes one histogram per peer in the
+Prometheus text exposition format, cumulative from the moment the session
+opened — which is what `rate()` and `histogram_quantile()` need. The scrape
+job is in [docs/prometheus-scrape.yml](docs/prometheus-scrape.yml) and the
+dashboard in [docs/grafana-dashboard.json](docs/grafana-dashboard.json).
+
+![wallclock destinations in Grafana](docs/grafana-destinations.png)
+
+Three things in that picture are decisions rather than defaults.
+
+**The latency panels have a traffic floor** — only destinations doing more
+than one exchange a second. Without it a single idle keep-alive connection,
+whose "round trip" is really a peer's think time, sits at two minutes and
+flattens every real series to zero. That happened on the first render, and the
+panel description says so rather than the filter being silent.
+
+**The exporter is pointed at one cgroup.** Watching the whole machine puts
+every ephemeral port on the box into the legend. `-cgroup` is not an
+optimisation here; it is what makes the dashboard readable.
+
+**Only Redis clears the floor in that window**, which is true rather than a
+rendering accident: at this load it takes several thousand exchanges a second
+and the other two take a few hundred in total. They are visible in the bottom
+panel, which is deliberately unfiltered — a destination with a high latency and
+two exchanges a second is a different problem from one with a low latency and
+ten thousand.
+
+One trap worth writing down, since it cost two renders: restarting a container
+gives it a **new cgroup inode under the same container id**. An exporter
+started before that restart then watches a cgroup nothing is in, and reports
+nothing at all — very convincingly, with no error anywhere.
+
 ### Pointing it at the question it was built for
 
 **Context.** The project this one grew out of left a sentence in its README: at
@@ -1466,6 +1500,68 @@ the price of the answer being true. It also has to be run as root to be
 conclusive, so an unprivileged run reports a failure that is really "ask
 again with privileges"; the consequence text says so rather than leaving the
 reader to work it out.
+
+## What this does not measure
+
+A limitations section written properly earns more trust than its absence, and
+most of these were found by measuring rather than by guessing. Every one has a
+number or a mechanism behind it somewhere above.
+
+**A thread that never leaves its CPU is never seen.** This tool learns of a
+thread from scheduler events. A thread that holds a core for the whole window
+produces none, and does not appear at all — not as a zero, as an absence. The
+same is true of a thread that was already asleep when profiling started and
+never wakes.
+
+**Go's network waiting is not here, and neither is anyone else's event loop.**
+A goroutine parked in the netpoller stops no thread, so it costs no blocked
+time. PostgreSQL backends and Redis wait in `epoll` for the same effect.
+[Measured](#the-go-execution-model-and-what-it-hides-from-the-kernel): across a
+whole machine under load, six threads recorded any network-blocked time at
+all, 164 ms between them, every one a short-lived one-shot client.
+`destinations` exists because of this and answers a different question — how
+long a peer took, not how long a thread waited.
+
+**Futex time is ambiguous and cannot be disambiguated from here.** An idle Go
+M parked in `notesleep` and a goroutine stopped on a contended mutex are the
+same `futex_wait` on an address the kernel cannot interpret. A mostly-idle
+thread pool and a badly contended one look identical.
+
+**"Blocked 96%" is not latency.** A process's decomposition is in
+thread-seconds. Sixteen mostly-idle threads report the same 96% whether the
+service handled a million requests or none.
+
+**Percentiles are bucket ceilings.** Four buckets to the octave, so a reported
+p99 is at or below the true one by up to 25%. Means are exact; percentiles are
+not interpolated, deliberately.
+
+**Round trips are pairings, not parsed protocol.** `destinations` pairs a send
+with the next receive on the same connection. A connection that streams one
+way, or pipelines several requests before reading any reply, is measured as
+something else. Inbound connections accepted *before* profiling started are
+not recognised as inbound and appear as destinations.
+
+**16 384 threads between reads.** Beyond that the map is full and events are
+dropped — [counted and reported](#how-this-was-validated-and-what-it-costs),
+never silently. Event *rate* is not the limit: a quarter of a million context
+switches a second loses nothing.
+
+**It costs something.** 5.7% of throughput at 74 000 context switches a
+second, against a 0.8% noise floor. Above roughly a hundred thousand the
+measurement method can no longer resolve the profiler at all, which is stated
+rather than filled in with a number.
+
+**Kernels and permissions.** Linux 5.8 or newer with `CONFIG_DEBUG_INFO_BTF=y`
+and cgroup v2; root, or `CAP_BPF` and `CAP_PERFMON`. No BTF means no CO-RE and
+nothing loads — BTFHub-style external blobs are a real answer this project
+does not implement. IPv4 only in `destinations`. x86-64 only, tested on two
+kernels: 6.6 locally and 6.17 in CI, [the same binary on both](#co-re-not-bcc).
+Full details in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
+**Inside a pid namespace, `-pid` is refused rather than wrong.** The kernel
+numbers pids in the initial namespace and a container numbers them differently.
+The tool checks and stops; `-cgroup` is the filter that means the same thing
+everywhere.
 
 ## Requirements
 
