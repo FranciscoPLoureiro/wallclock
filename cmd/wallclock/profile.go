@@ -22,7 +22,7 @@ usage:
 flags:
   -pid N          only this process and the threads it starts (default: everything)
   -for DURATION   how long to observe (default 10s)
-  -top N          how many threads to show, busiest first (default 15)
+  -top N          how many rows to show, busiest first (default 15)
   -comm SUBSTRING only threads whose name contains this
   -cgroup PATH    only threads in this cgroup, e.g. a container directory
                   under /sys/fs/cgroup
