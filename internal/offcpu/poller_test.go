@@ -200,6 +200,37 @@ func TestPollersKeepProcessesApart(t *testing.T) {
 	}
 }
 
+// Where a thread really is the event loop, it is named; where the loop is a
+// role that moves, nothing is named, and that is the answer rather than a
+// failure to find one.
+func TestDedicatedPollersAreNamedOnlyWhenTheyExist(t *testing.T) {
+	const ms = time.Millisecond
+
+	// Redis's shape: one thread whose waiting is the loop, and a helper that
+	// waits on other things.
+	dedicated := offcpu.DedicatedPollers([]offcpu.Blocked{
+		pollRow(1, 950*ms), futexRow(1, 50*ms),
+		futexRow(2, 900*ms),
+	})
+	if !dedicated[1] {
+		t.Error("thread 1 waits almost only in the event loop and was not named")
+	}
+	if dedicated[2] {
+		t.Error("thread 2 never polled at all and was named")
+	}
+
+	// Go's shape: every thread polls a little, none of them is the poller.
+	rotating := offcpu.DedicatedPollers([]offcpu.Blocked{
+		pollRow(10, 60*ms), futexRow(10, 940*ms),
+		pollRow(11, 70*ms), futexRow(11, 930*ms),
+		pollRow(12, 50*ms), futexRow(12, 950*ms),
+	})
+	if len(rotating) != 0 {
+		t.Errorf("named %d threads as the event loop in a runtime that has no "+
+			"such thread: %v", len(rotating), rotating)
+	}
+}
+
 // A process nothing is known about yet still has to be counted.
 //
 // A thread learns which process it belongs to from the first event able to

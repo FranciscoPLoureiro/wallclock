@@ -105,6 +105,40 @@ func (p Poller) Rotating() bool {
 	return p.Polling >= rotatingMinThreads && p.Dedication < rotatingMaxDedication
 }
 
+// DedicatedPollers names the threads whose waiting is mostly an event loop.
+//
+// This is the thread-level half of the same question, and it is the half that
+// has an answer only sometimes. Where a thread *is* the poller -- Redis's one
+// thread, an nginx worker, a named selector thread -- it is here, and the
+// report marks it so its blocked time is not read as a slow dependency: a
+// thread in epoll is waiting to be given work, not waiting for work to
+// finish. Where the poller is a role that rotates, this is empty, and that
+// emptiness is the finding rather than a failure to look.
+func DedicatedPollers(blocked []Blocked) map[uint32]bool {
+	type totals struct{ poll, blocked time.Duration }
+	perTID := make(map[uint32]*totals)
+	for _, b := range blocked {
+		t, ok := perTID[b.TID]
+		if !ok {
+			t = &totals{}
+			perTID[b.TID] = t
+		}
+		t.blocked += b.Duration
+		if b.Reason == ReasonPoll {
+			t.poll += b.Duration
+		}
+	}
+
+	out := make(map[uint32]bool)
+	for tid, t := range perTID {
+		if t.poll > 0 && t.blocked > 0 &&
+			float64(t.poll)/float64(t.blocked) >= dedicatedThreadShare {
+			out[tid] = true
+		}
+	}
+	return out
+}
+
 // Pollers summarises the event-loop waiting of every process the blocked rows
 // belong to.
 //

@@ -27,6 +27,7 @@ flags:
   -cgroup PATH    only threads in this cgroup, e.g. a container directory
                   under /sys/fs/cgroup
   -reasons        break blocked time down by what was being waited for
+  -processes      add the threads up per process instead of listing them
   -folded FILE    write off-CPU folded stacks for flamegraph.pl
 `
 
@@ -34,13 +35,14 @@ func runProfile(args []string) error {
 	fs := flag.NewFlagSet("profile", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, profileUsage) }
 	var (
-		pid     = fs.Int("pid", 0, "")
-		window  = fs.Duration("for", 10*time.Second, "")
-		top     = fs.Int("top", 15, "")
-		comm    = fs.String("comm", "", "")
-		cgroup  = fs.String("cgroup", "", "")
-		reasons = fs.Bool("reasons", false, "")
-		folded  = fs.String("folded", "", "")
+		pid       = fs.Int("pid", 0, "")
+		window    = fs.Duration("for", 10*time.Second, "")
+		top       = fs.Int("top", 15, "")
+		comm      = fs.String("comm", "", "")
+		cgroup    = fs.String("cgroup", "", "")
+		reasons   = fs.Bool("reasons", false, "")
+		processes = fs.Bool("processes", false, "")
+		folded    = fs.String("folded", "", "")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -88,7 +90,12 @@ func runProfile(args []string) error {
 		blocked []offcpu.Blocked
 		symbols *ksyms.Table
 	)
-	wantReasons := *reasons || *folded != ""
+	// The process view needs the reasons whether or not they were asked for:
+	// what it has to say about a process is decided by where that process's
+	// threads waited, and a view that stayed silent about a rotating event
+	// loop unless a second flag was passed would be silent exactly when the
+	// number above it is most misleading.
+	wantReasons := *reasons || *folded != "" || *processes
 	if wantReasons {
 		var err error
 		if symbols, err = ksyms.Load(); err != nil {
@@ -138,6 +145,21 @@ func runProfile(args []string) error {
 		}
 	}
 
+	// The process view answers a different question and replaces the table
+	// rather than sitting beside it. A thread is what the scheduler moves; a
+	// process is what somebody deployed, and a runtime that spreads one
+	// service over sixteen interchangeable threads is only describable at the
+	// second.
+	if *processes {
+		if err := writeProcesses(os.Stdout, offcpu.Rollup(threads),
+			offcpu.Pollers(blocked, threads), *top); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "\n%d threads observed\n", len(threads))
+		reportResiduals(threads)
+		return reportProfileDrops(session)
+	}
+
 	// Busiest first, where busy means "spent the most wall clock somewhere
 	// other than running" -- the whole point being that the interesting
 	// threads are the ones a CPU profiler would rank last.
@@ -149,6 +171,13 @@ func runProfile(args []string) error {
 		}
 		return threads[i].TID < threads[j].TID
 	})
+
+	// The threads for which "the event loop" is a thread rather than a role.
+	// Marking them is the thread-level half of phase 3, and it is the half
+	// that has an answer only sometimes: a Go runtime produces none of these,
+	// and the absence is the finding rather than a gap. Empty when the
+	// reasons were not read, which is the same as knowing of none.
+	eventLoops := offcpu.DedicatedPollers(blocked)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', tabwriter.AlignRight)
 	fmt.Fprintln(w, "tid\tobserved\ton-cpu\trunqueue\tthrottled\tblocked\tunknown\t  command")
@@ -167,6 +196,12 @@ func runProfile(args []string) error {
 		name := t.Comm
 		if t.Exited {
 			name += " (exited)"
+		}
+		// A thread in epoll is waiting to be given work, not waiting for work
+		// to finish, and its blocked share reads as a slow dependency unless
+		// it is said so.
+		if eventLoops[t.TID] {
+			name += " [event loop]"
 		}
 		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t  %s\n",
 			t.TID,
