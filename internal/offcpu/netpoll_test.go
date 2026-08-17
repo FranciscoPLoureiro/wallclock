@@ -69,10 +69,10 @@ func TestGoroutineWaitsAreInvisibleAndThreadWaitsAreNot(t *testing.T) {
 	server := slowServer(t)
 	defer server.Close()
 
-	byGoroutine := measureBlockedReasons(t, func() {
+	byGoroutine, pool := measureBlockedReasons(t, func() {
 		runNetpollClients(t, server.URL)
 	})
-	byThread := measureBlockedReasons(t, func() {
+	byThread, _ := measureBlockedReasons(t, func() {
 		runBlockingClients(t, server.Listener.Addr().String())
 	})
 
@@ -122,6 +122,22 @@ func TestGoroutineWaitsAreInvisibleAndThreadWaitsAreNot(t *testing.T) {
 			"sockets: the waiting is not where the explanation says it is",
 			byGoroutine.poll, byGoroutine.network)
 	}
+
+	// And the shape, against the classifier that has to recognise it in the
+	// field. This process is a Go runtime, so it had better look like one:
+	// the polling spread over a pool of threads with none of them owning it.
+	// Asserting it here rather than only in the table-driven tests is what
+	// stops those tables from drifting into describing a Go runtime that
+	// stopped existing three releases ago.
+	t.Logf("  the netpoller run as a pool: %d of %d threads polled, %.0f%% of the "+
+		"polling on dedicated threads, busiest held %.1f%%",
+		pool.Polling, pool.Threads, 100*pool.Dedication, 100*pool.Busiest)
+	if !pool.Rotating() {
+		t.Errorf("a Go runtime under load was not recognised as a rotating "+
+			"poller: %d of %d threads polled, %.0f%% of the polling was done "+
+			"by threads dedicated to it, and the busiest held %.1f%%",
+			pool.Polling, pool.Threads, 100*pool.Dedication, 100*pool.Busiest)
+	}
 }
 
 // reasonTotals is one window's blocked time, split by what was waited on, for
@@ -156,7 +172,7 @@ func (r reasonTotals) String() string {
 // netpoller run there is no interesting thread to find -- that is the result
 // -- so the sum has to be over the whole process or it would be measuring the
 // absence of something nobody looked for.
-func measureBlockedReasons(t *testing.T, workload func()) reasonTotals {
+func measureBlockedReasons(t *testing.T, workload func()) (reasonTotals, offcpu.Poller) {
 	t.Helper()
 
 	session, err := offcpu.Open(0)
@@ -225,7 +241,7 @@ func measureBlockedReasons(t *testing.T, workload func()) reasonTotals {
 			totals.other += b.Duration
 		}
 	}
-	return totals
+	return totals, offcpu.Pollers(blocked, threads)[anchor.TGID]
 }
 
 // startAnchor pins and names one thread so the process can be recognised.
