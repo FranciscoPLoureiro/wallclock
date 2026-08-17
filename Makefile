@@ -146,6 +146,14 @@ smoke: bpf build ## Run every test that needs a real kernel (needs root)
 
 FLAME_WINDOW ?= 20s
 
+.PHONY: validate
+validate: build ## Measure the tool against answers known in advance (needs root)
+	# The validation table in the README, generated rather than transcribed.
+	# It exits non-zero when a scenario lands outside its declared tolerance,
+	# which is what makes the tolerances mean something: a number typed into
+	# a README by hand is a claim about a run nobody can repeat.
+	$(SUDO) $(BIN) validate
+
 .PHONY: flamegraph
 flamegraph: build ## Record off-CPU stacks and render a flame graph (needs root)
 	# An off-CPU flame graph, not the usual kind: the width of a frame is not
