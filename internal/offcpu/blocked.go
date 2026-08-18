@@ -196,17 +196,28 @@ func (s *Session) stackFrames(id int32, symbols *ksyms.Table) ([]string, error) 
 //     could not be captured or was evicted before it could be read. Folding
 //     it into "other" would be presenting a gap as a finding.
 //   - negative is the reasons adding to more than the wait they explain,
-//     which cannot be true of the same intervals. **The cause of this is not
-//     yet established.** It is measured at up to 7% of a thread's blocked
-//     time on a busy machine, which is far too large to be the millisecond
-//     the two reads are apart, so the read-skew explanation is ruled out
-//     rather than assumed. The candidates still open are stack ids being
-//     recycled between threads and an interval being credited twice on some
-//     path through the state machine.
+//     which cannot be true of the same intervals. It was measured at up to
+//     18% of a thread's blocked time, the cause is now known, and it is read
+//     skew: the fix is the read ordering documented on BlockedReasons above.
+//     It should not appear again, and if it does, that ordering is the first
+//     thing to check.
 //
-// It is reported either way rather than clamped, because a number that
-// disagrees with itself in public is the only thing that gets the cause
-// found. See NOTES.md.
+// **The read-skew explanation was rejected once before it was accepted**, and
+// why is worth keeping. The argument against it was that a millisecond
+// between two reads cannot account for 900 ms of double counting. That is
+// true and it is beside the point: what lands in the gap between two reads is
+// not the length of the gap, it is the whole of whatever wait closed during
+// it. A thread blocked for 900 ms whose wait ends inside that millisecond
+// contributes all 900 ms twice. The mechanism was right and the bound was
+// wrong — which is the shape of argument that survives longest unchallenged,
+// because the arithmetic in it checks out.
+//
+// It is reported either way rather than clamped, and that is what found the
+// cause: the number disagreeing with itself in public is the whole of the
+// evidence there was. TestReasonsNeverExceedTheBlockedTimeTheyExplain now
+// fails on any thread in the negative direction, over two rounds of a live
+// session, because one round could pass on a quiet moment where no wait
+// happened to close in the gap.
 func ByReason(blocked []Blocked, thread Thread) (map[Reason]time.Duration, time.Duration) {
 	totals := make(map[Reason]time.Duration)
 	var attributed time.Duration
