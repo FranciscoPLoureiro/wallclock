@@ -1017,10 +1017,35 @@ this method reports when the true answer is known to be zero. Anything smaller
 than that has not been measured, and prints as `under noise` rather than as a
 number somebody would quote back.
 
-The one clean reading is **5.7% at seventy-four thousand context switches a
-second, against a noise floor of 0.8%**. Above that the load saturates sixteen
+**The number to quote is a range, and that is because it was measured more
+than once.** The run printed above reads 5.7% at seventy-four thousand
+switches a second against a 0.8% noise floor. Repeating it later on the same
+machine gave **+8.2% against 4.7% noise** and **+8.6% against 1.7% noise**, at
+77 400 and 80 500 switches a second:
+
+| run | switches/s | overhead | noise floor |
+|---|---|---|---|
+| first | 73 978 | +5.7% | 0.8% |
+| second | 77 414 | +8.2% | 4.7% |
+| third | 80 506 | +8.6% | 1.7% |
+
+So the honest figure is **five to nine per cent of throughput at around
+seventy-five thousand context switches a second**, and quoting the 5.7% alone
+would be quoting the best run as though it were the typical one. The two later
+runs had a container runtime idling on the machine and the first did not,
+which is not a controlled difference — it is the ordinary condition of a
+laptop, and it moves the answer by half again.
+
+The third run is the one worth reading, because 8.6% against a 1.7% floor is a
+clean measurement by this method's own standard, and it disagrees with the
+published number. The second is what a noisy machine looks like: 8.2% against
+4.7% is barely a measurement at all, and the noise column is there so that it
+cannot be mistaken for one.
+
+Above roughly a hundred thousand switches a second the load saturates sixteen
 cores by itself and the method can no longer resolve the profiler at all,
-which is worth saying plainly rather than filling the row with a figure.
+which is worth saying plainly rather than filling the row with a figure. That
+part reproduced in all three runs.
 
 **The limit that is actually reachable is not the event rate.** A quarter of a
 million switches a second loses nothing, because the same few threads are
@@ -1562,10 +1587,11 @@ dropped — [counted and reported](#how-this-was-validated-and-what-it-costs),
 never silently. Event *rate* is not the limit: a quarter of a million context
 switches a second loses nothing.
 
-**It costs something.** 5.7% of throughput at 74 000 context switches a
-second, against a 0.8% noise floor. Above roughly a hundred thousand the
-measurement method can no longer resolve the profiler at all, which is stated
-rather than filled in with a number.
+**It costs something, and how much depends on what else the machine is
+doing.** Five to nine per cent of throughput at around 75 000 context switches
+a second, measured three times against noise floors between 0.8% and 4.7%.
+Above roughly a hundred thousand the measurement method can no longer resolve
+the profiler at all, which is stated rather than filled in with a number.
 
 **Kernels and permissions.** Linux 5.8 or newer with `CONFIG_DEBUG_INFO_BTF=y`
 and cgroup v2; root, or `CAP_BPF` and `CAP_PERFMON`. No BTF means no CO-RE and
