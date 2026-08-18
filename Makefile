@@ -178,18 +178,21 @@ compare: build ## Run wallclock, offcputime and runqlat on the same subjects (ne
 flamegraph: build ## Record off-CPU stacks and render a flame graph (needs root)
 	# An off-CPU flame graph, not the usual kind: the width of a frame is not
 	# how long that code ran, it is how long a thread sat still inside it.
+	#
+	# Rendered by the tool itself rather than by flamegraph.pl. Two reasons,
+	# and neither is not-invented-here: this is one command on a clean clone
+	# with nothing to fetch, and the colour of a frame can be the reason the
+	# thread stopped -- which this profiler classified on the way past and a
+	# renderer given only a folded file cannot know. The folded file is
+	# written as well, for anyone who wants to take it elsewhere.
 	@mkdir -p docs
-	$(SUDO) $(BIN) profile -for $(FLAME_WINDOW) -folded build/offcpu.folded
-	@if command -v flamegraph.pl >/dev/null 2>&1; then \
-		flamegraph.pl --title "wallclock: off-CPU" --countname us --colors io \
-			build/offcpu.folded > docs/offcpu-flamegraph.svg; \
-		echo "wrote docs/offcpu-flamegraph.svg"; \
-	else \
-		echo; \
-		echo "build/offcpu.folded is ready. flamegraph.pl is not on PATH; it is a"; \
-		echo "single Perl script from github.com/brendangregg/FlameGraph:"; \
-		echo "  flamegraph.pl --countname us build/offcpu.folded > docs/offcpu-flamegraph.svg"; \
-	fi
+	$(SUDO) $(BIN) profile -for $(FLAME_WINDOW) \
+		-folded build/offcpu.folded -flame docs/offcpu-flamegraph.svg
+	# Written by root, into a directory the repository tracks. Handed back to
+	# whoever owns the tree -- by reference rather than by `id -u`, because
+	# this target is usually run as root outright, where `id -u` is 0 and the
+	# chown would be a no-op that reads like a fix.
+	@$(SUDO) chown --reference=Makefile docs/offcpu-flamegraph.svg build/offcpu.folded
 
 .PHONY: clean
 clean: ## Remove build outputs

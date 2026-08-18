@@ -28,7 +28,8 @@ flags:
                   under /sys/fs/cgroup
   -reasons        break blocked time down by what was being waited for
   -processes      add the threads up per process instead of listing them
-  -folded FILE    write off-CPU folded stacks for flamegraph.pl
+  -folded FILE    write off-CPU folded stacks, the format flamegraph.pl reads
+  -flame FILE     render the off-CPU flame graph straight to FILE, as SVG
 `
 
 func runProfile(args []string) error {
@@ -43,6 +44,7 @@ func runProfile(args []string) error {
 		reasons   = fs.Bool("reasons", false, "")
 		processes = fs.Bool("processes", false, "")
 		folded    = fs.String("folded", "", "")
+		flame     = fs.String("flame", "", "")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -95,7 +97,7 @@ func runProfile(args []string) error {
 	// threads waited, and a view that stayed silent about a rotating event
 	// loop unless a second flag was passed would be silent exactly when the
 	// number above it is most misleading.
-	wantReasons := *reasons || *folded != "" || *processes
+	wantReasons := *reasons || *folded != "" || *flame != "" || *processes
 	if wantReasons {
 		var err error
 		if symbols, err = ksyms.Load(); err != nil {
@@ -226,16 +228,13 @@ func runProfile(args []string) error {
 		return err
 	}
 
-	if *folded != "" {
-		file, err := os.Create(*folded)
-		if err != nil {
-			return fmt.Errorf("creating the folded stack file: %w", err)
-		}
-		defer file.Close()
-		if err := writeFolded(file, blocked, threads); err != nil {
-			return fmt.Errorf("writing folded stacks: %w", err)
-		}
-		fmt.Fprintf(os.Stdout, "\nfolded off-CPU stacks written to %s\n", *folded)
+	// Filtered to the threads in the table above, and not to everything the
+	// session saw. The filters narrow that table; the stacks are a separate
+	// list that nothing else narrows.
+	if err := writeStackOutputs(os.Stdout, *folded, *flame,
+		describeSubject(target, *window, *comm, *cgroup),
+		keepStacksOf(blocked, threads), threads); err != nil {
+		return err
 	}
 
 	fmt.Fprintf(os.Stdout, "\n%d threads observed", len(threads))

@@ -8,35 +8,62 @@ CPU, ready but waiting for a CPU, ready but stopped by its own cgroup quota,
 blocked on the network per destination, blocked on a lock, blocked on disk.
 The application is not recompiled, restarted or instrumented.
 
-This is what it is being built to print:
+![wallclock profiling a container under load](docs/wallclock-demo.gif)
 
-```
-process: ticketoffice-api  (pid 4412, 14 threads, cgroup /docker/a3f1…)
-window: 30s
-
-  on-cpu                       18.3%   ████
-  runqueue (ready, no CPU)     28.4%   ██████
-  throttled (quota exhausted)  13.3%   ███
-  blocked on network           22.1%   █████
-    -> 10.5.0.3:6379  (redis)          16.8%
-    -> 10.5.0.4:5432  (postgres)        4.1%
-    -> 10.5.0.5:5672  (rabbitmq)        1.2%
-  blocked on futex             14.2%   ███
-  blocked on disk               2.1%
-  other                         1.6%
-                              ------
-                              100.0%
-```
-
-**The block above is the target, not a screenshot.** Everything in it except
-the per-destination network breakdown is measured today: on-CPU, runqueue
-delay, cgroup throttling, and blocked time split by what the thread was
-waiting on. Attributing network time to individual destinations is phase 4.
-The real output is at [what works now](#what-works-now).
+That is a real service — the API of
+[the ticket office](https://github.com/FranciscoPLoureiro/HighConcurrencyTicketOffice),
+taking about three thousand requests a second — profiled from outside the
+container by its cgroup, with nothing added to the application and nothing
+restarted. Fourteen seconds, uncut, including the ten it spends watching.
 
 The two lines that matter are *runqueue* and *throttled*, and they are the
 reason the project exists rather than a nicety: they look identical from
-outside and they are opposite problems.
+outside and they are opposite problems. Two identical spinning processes on
+an idle sixteen-core machine, one of them in a cgroup with `cpu.max` set to
+20 ms in every 100 ms:
+
+```
+$ sudo wallclock profile -for 6s -comm wc- -top 4
+     tid  observed        on-cpu     runqueue    throttled  blocked  unknown  command
+  138977     5.95s    20.2% 1.2s  0.5% 28.6ms  79.3% 4.72s  0.0% 0s  0.0% 0s  wc-capped
+  138979     5.98s  100.0% 5.98s   0.0% 152µs      0.0% 0s  0.0% 0s  0.0% 0s  wc-free
+
+2 threads observed
+every decomposition sums to 100% of the time observed
+no threads lost
+```
+
+**That is the whole argument in one table.** Both threads never stop asking
+for CPU. One gets 20.2% of one — the quota it was given, measured, not
+assumed — and spends 79.3% of its life *ready and forbidden*. The other gets
+100%.
+
+An off-CPU profiler reports the capped thread as roughly 80% "not running"
+and offers no way to tell that from a machine with no CPUs to spare.
+`runqueue 0.5%` is the sentence that distinguishes them: **nothing was
+contended**. The fix is one line of a compose file, and a tool that reported a
+single not-running number would have sent somebody to buy hardware.
+
+Back to the API in the recording above, this time drawn — one command,
+`make flamegraph`. An off-CPU flame graph rather than the usual kind: the
+width of a frame is not how long that code ran, it is how long a thread sat
+still inside it.
+
+![off-CPU flame graph of the ticket office API under load](docs/offcpu-flamegraph.svg)
+
+**Read the legend before the shape.** Every frame is coloured by what the
+thread was waiting for, and each category is stated with its share, because a
+picture embedded in a README is served as a flat image and has to answer the
+question without being hovered over. On that API, over that window: futex 66%,
+sleep 32.5%, poll 1.3% — and **network 0.1%**, on a Go service in the middle
+of thousands of Redis, PostgreSQL and RabbitMQ round trips a second.
+
+That last number is not a defect in the picture. It is
+[what the Go runtime does to this measurement](#the-go-execution-model-and-what-it-hides-from-the-kernel),
+it was established with a controlled experiment rather than assumed, and it
+is the reason time spent on each destination is
+[measured a different way](#and-what-this-decided-about-phase-4) instead of
+being split out of the blocked column.
 
 **The percentages summing to 100% is the point.** Existing tools report loose
 quantities that do not compose: `offcputime` gives off-CPU stacks without
@@ -66,34 +93,12 @@ That is a correlation. This is the tool that turns it into an explanation.
 
 ## What works now
 
-Two identical spinning processes on an idle sixteen-core machine. One of them
-is in a cgroup with `cpu.max` set to 20 ms in every 100 ms; the other is not:
-
-```
-$ sudo wallclock profile -for 6s -comm wc- -top 4
-     tid  observed        on-cpu     runqueue    throttled  blocked  unknown  command
-  138977     5.95s    20.2% 1.2s  0.5% 28.6ms  79.3% 4.72s  0.0% 0s  0.0% 0s  wc-capped
-  138979     5.98s  100.0% 5.98s   0.0% 152µs      0.0% 0s  0.0% 0s  0.0% 0s  wc-free
-
-2 threads observed
-every decomposition sums to 100% of the time observed
-no threads lost
-```
-
-**That is the whole argument in one table.** Both threads never stop asking
-for CPU. One gets 20.2% of one — the quota it was given, measured, not
-assumed — and spends 79.3% of its life *ready and forbidden*. The other gets
-100%.
-
-An off-CPU profiler reports the capped thread as roughly 80% "not running"
-and offers no way to tell that from a machine with no CPUs to spare.
-`runqueue 0.5%` is the sentence that distinguishes them: **nothing was
-contended**. The fix is one line of a compose file, and a tool that reported a
-single not-running number would have sent somebody to buy hardware.
-
-The kernel's own tally for that cgroup over the same run: `nr_throttled 70`,
-`throttled_usec 5596241`. See [below](#throttling-measured-twice) for what
-that number is doing there.
+The kernel's own tally for the capped cgroup in the run at the top of this
+README: `nr_throttled 70`, `throttled_usec 5596241`. See
+[below](#throttling-measured-twice) for what that number is doing there, and
+for the run where the two are compared properly — the counter is cumulative
+over the cgroup's whole life and the profile covers one window of it, so
+these two are not the same quantity and are not being claimed to be.
 
 Wall clock split into where it actually went, without any cgroup involved.
 Forty-eight spinning threads on sixteen CPUs, so each one can have a third of
@@ -297,6 +302,17 @@ golangci-lint. Then:
 | `make preflight` | Check this host against the requirements |
 | `make smoke` | Run every test that needs a real kernel (needs root) |
 | `make test` | Tests with the race detector |
+| `make flamegraph` | Record off-CPU stacks and render the picture above |
+| `make validate` | Measure the tool against answers known in advance |
+| `make overhead` | Measure what the tool costs against event rate |
+| `make compare` | Run wallclock, `offcputime` and `runqlat` on the same subjects |
+
+`make flamegraph` needs nothing that is not in this repository. The renderer
+is part of the tool — `wallclock profile -flame out.svg` — rather than a call
+out to `flamegraph.pl`, which is what lets the colour of a frame be the
+reason the thread stopped; a renderer handed only a folded file cannot know
+that. `-folded out.folded` still writes the interchange format, so the same
+capture can be taken to any other flame graph tool.
 
 The compiled BPF object is embedded in the binary by
 [bpf2go](https://pkg.go.dev/github.com/cilium/ebpf/cmd/bpf2go), and both the
