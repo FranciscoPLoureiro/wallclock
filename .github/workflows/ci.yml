@@ -267,27 +267,15 @@ jobs:
       - name: Build the binary the guest will run
         run: make bpf build
 
-      - name: What this kernel actually offers
-        # The same facts the runner job records, recorded again per kernel,
-        # because the first question about any failure below is what was
-        # different. Never allowed to fail the job: it is evidence, and
-        # evidence that can break the run gets deleted the first time it does.
-        continue-on-error: true
-        run: |
-          {
-            echo "### ${{ matrix.kernel }}"
-            echo
-            echo '```'
-            vimto -kernel ":${{ matrix.kernel }}" exec -- /bin/sh -c '
-              echo "uname -r      $(uname -r)"
-              echo "BTF           $(ls -l /sys/kernel/btf/vmlinux 2>&1 | tail -1)"
-              echo "cgroup fs     $(stat -fc %T /sys/fs/cgroup 2>&1)"
-              echo "controllers   $(cat /sys/fs/cgroup/cgroup.controllers 2>&1)"
-              echo "cpus          $(nproc)"
-            ' 2>&1
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-
+      # There is no separate step probing what the guest offers, and there was
+      # one. It ran a multi-line `/bin/sh -c` through the guest and hung all
+      # six kernels for twenty-five minutes, which is how a bespoke shell
+      # script earns its removal rather than its debugging.
+      #
+      # `preflight` reports the same facts -- release, BTF, cgroup version,
+      # the cpu controller -- by attempting each one, and it is the project's
+      # own environment prober. Using it here rather than reimplementing it in
+      # sh means the evidence and the assertion are the same command.
       - name: The requirements, checked from inside the guest
         if: matrix.expect != 'refuse'
         # preflight attempts each requirement rather than inspecting for it,

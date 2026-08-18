@@ -34,10 +34,6 @@ setup = [
   # tests fail for a reason that has nothing to do with the kernel version
   # being tested.
   "/bin/sh -c 'echo +cpu > /sys/fs/cgroup/cgroup.subtree_control || true'",
-  # Stack traces are named from here. A missing kallsyms turns every blocked
-  # reason into `other`, which is a plausible-looking report rather than an
-  # error.
-  "/bin/sh -c 'mount -t proc proc /proc 2>/dev/null || true'",
   "dmesg --clear",
 ]
 
