@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/FranciscoPLoureiro/wallclock/internal/flamegraph"
 	"github.com/FranciscoPLoureiro/wallclock/internal/offcpu"
 )
 
@@ -13,9 +17,9 @@ import (
 //
 // The filters -- -pid, -cgroup, -comm -- narrow the thread table, and the
 // blocked stacks are a separate list keyed by TID that nothing narrows. Left
-// alone, the folded file of one container is the folded file of the machine,
-// with every foreign thread written out under an invented tid-N name because
-// the table has nothing to call it. Nothing about the result looks wrong.
+// alone, a flame graph of one container is a flame graph of the machine,
+// with every foreign thread drawn under an invented tid-N name because the
+// table has nothing to call it. The picture would look entirely plausible.
 func keepStacksOf(blocked []offcpu.Blocked, threads []offcpu.Thread) []offcpu.Blocked {
 	reported := make(map[uint32]struct{}, len(threads))
 	for _, t := range threads {
@@ -28,6 +32,73 @@ func keepStacksOf(blocked []offcpu.Blocked, threads []offcpu.Thread) []offcpu.Bl
 		}
 	}
 	return kept
+}
+
+// writeStackOutputs writes whichever of the two stack outputs were asked for.
+//
+// Both come from the same folded bytes rather than from two walks of the
+// data, so the file and the picture cannot disagree about what was measured.
+func writeStackOutputs(stdout io.Writer, foldedPath, flamePath, subject string,
+	blocked []offcpu.Blocked, threads []offcpu.Thread,
+) error {
+	var folded bytes.Buffer
+	if err := writeFolded(&folded, blocked, threads); err != nil {
+		return fmt.Errorf("folding off-CPU stacks: %w", err)
+	}
+
+	if foldedPath != "" {
+		if err := writeFile(foldedPath, func(w io.Writer) error {
+			_, err := w.Write(folded.Bytes())
+			return err
+		}); err != nil {
+			return fmt.Errorf("writing the folded stack file: %w", err)
+		}
+		fmt.Fprintf(stdout, "\nfolded off-CPU stacks written to %s\n", foldedPath)
+	}
+
+	if flamePath != "" {
+		if err := writeFile(flamePath, func(w io.Writer) error {
+			return flamegraph.Render(w, bytes.NewReader(folded.Bytes()), flamegraph.Options{
+				Title:    "wallclock: off-CPU",
+				Subtitle: subject,
+			})
+		}); err != nil {
+			return fmt.Errorf("rendering the flame graph: %w", err)
+		}
+		fmt.Fprintf(stdout, "\noff-CPU flame graph written to %s\n", flamePath)
+	}
+	return nil
+}
+
+// describeSubject names what was profiled, for the subtitle of the flame
+// graph. The picture leaves the terminal it was taken in, and a flame graph
+// that does not say what it was pointed at or for how long is an
+// illustration rather than a measurement.
+func describeSubject(target string, window time.Duration, comm, cgroup string) string {
+	parts := []string{target}
+	if comm != "" {
+		parts = append(parts, fmt.Sprintf("named like %q", comm))
+	}
+	if cgroup != "" {
+		parts = append(parts, "in "+cgroup)
+	}
+	return fmt.Sprintf("%s, over %s", strings.Join(parts, ", "), window)
+}
+
+// writeFile creates a file, hands it to write, and closes it -- checking the
+// close rather than deferring it away. A write that fails while flushing
+// fails there and nowhere else, and a report that is silently half a file is
+// worse than one that did not appear.
+func writeFile(path string, write func(io.Writer) error) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if err := write(file); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 // writeFolded prints one line per stack, in the format flamegraph.pl reads:
