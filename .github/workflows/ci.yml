@@ -335,9 +335,19 @@ jobs:
 
       - name: On a kernel below the floor, refuse and say why
         if: matrix.expect == 'refuse'
-        # Asserted on the exit status and on the message. A tool that exits
-        # non-zero for the wrong reason passes a status check and still
-        # misleads whoever reads the output.
+        # A test of a refusal has a failure mode a test of a success does not:
+        # almost everything that goes wrong also produces a non-zero exit, so
+        # "it failed" is not evidence that it failed *for the stated reason*.
+        #
+        # This step already passed once on nothing at all. The guest hung, the
+        # deadline killed QEMU with status 124, the loose pattern below matched
+        # the word "kernel" in the timeout message, and the job went green with
+        # the tool never having run. Fourth time in this project that a check
+        # passed for the wrong reason, and the first written in this file.
+        #
+        # So: 124 is rejected explicitly, and the pattern is now the name of
+        # the requirement preflight prints rather than any word that might
+        # appear in an unrelated error.
         run: |
           set +e
           out=$(timeout 300 vimto -kernel ":${{ matrix.kernel }}" exec -- ./bin/wallclock preflight 2>&1)
@@ -351,11 +361,15 @@ jobs:
             echo "exit status: $status"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -eq 124 ]; then
+            echo "the guest never returned, so this asserts nothing" >&2
+            exit 1
+          fi
           if [ "$status" -eq 0 ]; then
             echo "preflight accepted a kernel below the stated minimum of 5.8" >&2
             exit 1
           fi
-          echo "$out" | grep -qiE '5\.8|too old|minimum|kernel' || {
-            echo "preflight refused, but not for a reason a reader can act on" >&2
+          echo "$out" | grep -qF 'kernel >= 5.8' || {
+            echo "preflight refused, but not with the requirement that should have failed" >&2
             exit 1
           }
