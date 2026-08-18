@@ -202,7 +202,22 @@ jobs:
   kernel-matrix:
     name: kernel ${{ matrix.kernel }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Fifteen rather than twenty-five, and each vimto call is wrapped in a
+    # timeout of its own below. A guest that cannot start the binary handed to
+    # it does not fail -- it waits, and the only thing that ends the wait is a
+    # deadline. Two rounds of this were spent watching six jobs sit still.
+    timeout-minutes: 15
+    # Everything here runs inside the guest, and the guest takes /lib from the
+    # kernel image -- which carries modules, not a libc. A Go binary linked
+    # against the host's libc finds nothing to link against and never starts,
+    # which presents as a hang rather than as an error: `ldd bin/wallclock` on
+    # an ordinary build lists libc.so.6, and with this it says "not a dynamic
+    # executable".
+    #
+    # vimto needs the same thing for the same reason and says so when it is
+    # missing. This binary says nothing at all.
+    env:
+      CGO_ENABLED: "0"
     # A CO-RE tool that has only ever run on the kernel it was written against
     # has not demonstrated the thing CO-RE is for. The job above proves the
     # programs load on the runner's kernel, and the runner offers exactly one.
@@ -287,7 +302,7 @@ jobs:
         # toolchain invocation is rejected as an unknown command -- naming the
         # binary, which reads like the binary is missing.
         run: |
-          vimto -kernel ":${{ matrix.kernel }}" exec -- ./bin/wallclock preflight \
+          timeout 300 vimto -kernel ":${{ matrix.kernel }}" exec -- ./bin/wallclock preflight \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Load, attach, and run every kernel test
@@ -306,7 +321,7 @@ jobs:
         env:
           WALLCLOCK_REQUIRE_BPF: "1"
         run: |
-          vimto -kernel ":${{ matrix.kernel }}" -- go test -count 1 -v \
+          timeout 600 vimto -kernel ":${{ matrix.kernel }}" -- go test -count 1 -v \
             ./internal/bpfload ./internal/syscount ./internal/offcpu ./internal/netlat \
             2>&1 | tee /tmp/kernel-tests.log
           # Belt and braces on top of WALLCLOCK_REQUIRE_BPF, because the way
@@ -325,7 +340,7 @@ jobs:
         # misleads whoever reads the output.
         run: |
           set +e
-          out=$(vimto -kernel ":${{ matrix.kernel }}" exec -- ./bin/wallclock preflight 2>&1)
+          out=$(timeout 300 vimto -kernel ":${{ matrix.kernel }}" exec -- ./bin/wallclock preflight 2>&1)
           status=$?
           set -e
           {
