@@ -232,7 +232,10 @@ func runProfile(args []string) error {
 			return fmt.Errorf("creating the folded stack file: %w", err)
 		}
 		defer file.Close()
-		if err := writeFolded(file, blocked, threads); err != nil {
+		// The threads in the table above, and not everything the session saw.
+		// The filters narrow that table; the stacks are a separate list that
+		// nothing else narrows.
+		if err := writeFolded(file, keepStacksOf(blocked, threads), threads); err != nil {
 			return fmt.Errorf("writing folded stacks: %w", err)
 		}
 		fmt.Fprintf(os.Stdout, "\nfolded off-CPU stacks written to %s\n", *folded)

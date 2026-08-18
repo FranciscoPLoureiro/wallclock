@@ -9,6 +9,27 @@ import (
 	"github.com/FranciscoPLoureiro/wallclock/internal/offcpu"
 )
 
+// keepStacksOf drops the stacks of threads that are not being reported.
+//
+// The filters -- -pid, -cgroup, -comm -- narrow the thread table, and the
+// blocked stacks are a separate list keyed by TID that nothing narrows. Left
+// alone, the folded file of one container is the folded file of the machine,
+// with every foreign thread written out under an invented tid-N name because
+// the table has nothing to call it. Nothing about the result looks wrong.
+func keepStacksOf(blocked []offcpu.Blocked, threads []offcpu.Thread) []offcpu.Blocked {
+	reported := make(map[uint32]struct{}, len(threads))
+	for _, t := range threads {
+		reported[t.TID] = struct{}{}
+	}
+	kept := make([]offcpu.Blocked, 0, len(blocked))
+	for _, b := range blocked {
+		if _, ok := reported[b.TID]; ok {
+			kept = append(kept, b)
+		}
+	}
+	return kept
+}
+
 // writeFolded prints one line per stack, in the format flamegraph.pl reads:
 //
 //	comm;outermost;...;innermost microseconds
