@@ -1,0 +1,238 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="450" viewBox="0 0 1200 450" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+<rect width="1200" height="450" fill="#f7f7f5"/>
+<text x="10" y="24" font-size="17" fill="#16161a">wallclock: off-CPU</text>
+<text x="10" y="42" font-size="12" fill="#5c5c66">every thread, in /sys/fs/cgroup/docker/5d43da3c73f4…, over 15s -- 46.297084s blocked across 88 stacks</text>
+<g><title>all
+46.297084s (100.00%)
+  network  49.803ms
+  futex    30.578594s
+  poll     607.046ms
+  sleep    15.060281s
+  other    1.36ms</title><rect x="10.0" y="379.0" width="1179.0" height="16" rx="2" fill="hsl(26,82%,56%)"/><text x="13.0" y="390.5" font-size="12" fill="#16161a">all</text></g>
+<g><title>api
+45.478833s (98.23%)
+  network  49.803ms
+  futex    29.850744s
+  poll     569.953ms
+  sleep    15.006973s
+  other    1.36ms</title><rect x="10.0" y="362.0" width="1158.1" height="16" rx="2" fill="hsl(26,82%,67%)"/><text x="13.0" y="373.5" font-size="12" fill="#16161a">api</text></g>
+<g><title>entry_SYSCALL_64_after_hwframe
+45.478773s (98.23%)
+  network  49.803ms
+  futex    29.850684s
+  poll     569.953ms
+  sleep    15.006973s
+  other    1.36ms</title><rect x="10.0" y="345.0" width="1158.1" height="16" rx="2" fill="hsl(26,82%,56%)"/><text x="13.0" y="356.5" font-size="12" fill="#16161a">entry_SYSCALL_64_after_hwframe</text></g>
+<g><title>do_syscall_64
+45.478773s (98.23%)
+  network  49.803ms
+  futex    29.850684s
+  poll     569.953ms
+  sleep    15.006973s
+  other    1.36ms</title><rect x="10.0" y="328.0" width="1158.1" height="16" rx="2" fill="hsl(26,82%,60%)"/><text x="13.0" y="339.5" font-size="12" fill="#16161a">do_syscall_64</text></g>
+<g><title>x64_sys_call
+45.478316s (98.23%)
+  network  49.803ms
+  futex    29.850684s
+  poll     569.953ms
+  sleep    15.006973s
+  other    903µs</title><rect x="10.0" y="311.0" width="1158.1" height="16" rx="2" fill="hsl(26,82%,65%)"/><text x="13.0" y="322.5" font-size="12" fill="#16161a">x64_sys_call</text></g>
+<g><title>__x64_sys_epoll_pwait
+569.953ms (1.23%)
+  poll     569.953ms</title><rect x="10.0" y="294.0" width="13.5" height="16" rx="2" fill="hsl(142,42%,67%)"/></g>
+<g><title>do_epoll_pwait.part.0
+569.953ms (1.23%)
+  poll     569.953ms</title><rect x="10.0" y="277.0" width="13.5" height="16" rx="2" fill="hsl(142,42%,64%)"/></g>
+<g><title>do_epoll_wait
+569.953ms (1.23%)
+  poll     569.953ms</title><rect x="10.0" y="260.0" width="13.5" height="16" rx="2" fill="hsl(142,42%,64%)"/></g>
+<g><title>schedule_hrtimeout_range
+569.953ms (1.23%)
+  poll     569.953ms</title><rect x="10.0" y="243.0" width="13.5" height="16" rx="2" fill="hsl(142,42%,66%)"/></g>
+<g><title>schedule_hrtimeout_range_clock
+569.953ms (1.23%)
+  poll     569.953ms</title><rect x="10.0" y="226.0" width="13.5" height="16" rx="2" fill="hsl(142,42%,65%)"/></g>
+<g><title>schedule
+569.953ms (1.23%)
+  poll     569.953ms</title><rect x="10.0" y="209.0" width="13.5" height="16" rx="2" fill="hsl(142,42%,67%)"/></g>
+<g><title>__schedule
+569.953ms (1.23%)
+  poll     569.953ms</title><rect x="10.0" y="192.0" width="13.5" height="16" rx="2" fill="hsl(142,42%,64%)"/></g>
+<g><title>__schedule
+569.953ms (1.23%)
+  poll     569.953ms</title><rect x="10.0" y="175.0" width="13.5" height="16" rx="2" fill="hsl(142,42%,64%)"/></g>
+<g><title>__x64_sys_futex
+29.774415s (64.31%)
+  futex    29.774415s</title><rect x="24.6" y="294.0" width="757.9" height="16" rx="2" fill="hsl(26,82%,66%)"/><text x="27.6" y="305.5" font-size="12" fill="#16161a">__x64_sys_futex</text></g>
+<g><title>do_futex
+29.774415s (64.31%)
+  futex    29.774415s</title><rect x="24.6" y="277.0" width="757.9" height="16" rx="2" fill="hsl(26,82%,64%)"/><text x="27.6" y="288.5" font-size="12" fill="#16161a">do_futex</text></g>
+<g><title>futex_wait
+29.774415s (64.31%)
+  futex    29.774415s</title><rect x="24.6" y="260.0" width="757.9" height="16" rx="2" fill="hsl(26,82%,61%)"/><text x="27.6" y="271.5" font-size="12" fill="#16161a">futex_wait</text></g>
+<g><title>futex_wait_queue
+29.774415s (64.31%)
+  futex    29.774415s</title><rect x="24.6" y="243.0" width="757.9" height="16" rx="2" fill="hsl(26,82%,56%)"/><text x="27.6" y="254.5" font-size="12" fill="#16161a">futex_wait_queue</text></g>
+<g><title>schedule
+29.774415s (64.31%)
+  futex    29.774415s</title><rect x="24.6" y="226.0" width="757.9" height="16" rx="2" fill="hsl(26,82%,67%)"/><text x="27.6" y="237.5" font-size="12" fill="#16161a">schedule</text></g>
+<g><title>__schedule
+29.774415s (64.31%)
+  futex    29.774415s</title><rect x="24.6" y="209.0" width="757.9" height="16" rx="2" fill="hsl(26,82%,64%)"/><text x="27.6" y="220.5" font-size="12" fill="#16161a">__schedule</text></g>
+<g><title>__schedule
+29.774415s (64.31%)
+  futex    29.774415s</title><rect x="24.6" y="192.0" width="757.9" height="16" rx="2" fill="hsl(26,82%,64%)"/><text x="27.6" y="203.5" font-size="12" fill="#16161a">__schedule</text></g>
+<g><title>__x64_sys_nanosleep
+15.006973s (32.41%)
+  sleep    15.006973s</title><rect x="783.4" y="294.0" width="381.5" height="16" rx="2" fill="hsl(212,12%,62%)"/><text x="786.4" y="305.5" font-size="12" fill="#16161a">__x64_sys_nanosleep</text></g>
+<g><title>hrtimer_nanosleep
+15.006973s (32.41%)
+  sleep    15.006973s</title><rect x="783.4" y="277.0" width="381.5" height="16" rx="2" fill="hsl(212,12%,62%)"/><text x="786.4" y="288.5" font-size="12" fill="#16161a">hrtimer_nanosleep</text></g>
+<g><title>do_nanosleep
+15.006973s (32.41%)
+  sleep    15.006973s</title><rect x="783.4" y="260.0" width="381.5" height="16" rx="2" fill="hsl(212,12%,66%)"/><text x="786.4" y="271.5" font-size="12" fill="#16161a">do_nanosleep</text></g>
+<g><title>schedule
+15.006973s (32.41%)
+  sleep    15.006973s</title><rect x="783.4" y="243.0" width="381.5" height="16" rx="2" fill="hsl(212,12%,67%)"/><text x="786.4" y="254.5" font-size="12" fill="#16161a">schedule</text></g>
+<g><title>__schedule
+15.006973s (32.41%)
+  sleep    15.006973s</title><rect x="783.4" y="226.0" width="381.5" height="16" rx="2" fill="hsl(212,12%,64%)"/><text x="786.4" y="237.5" font-size="12" fill="#16161a">__schedule</text></g>
+<g><title>__schedule
+15.006973s (32.41%)
+  sleep    15.006973s</title><rect x="783.4" y="209.0" width="381.5" height="16" rx="2" fill="hsl(212,12%,64%)"/><text x="786.4" y="220.5" font-size="12" fill="#16161a">__schedule</text></g>
+<g><title>__x64_sys_read
+125.381ms (0.27%)
+  network  49.197ms
+  futex    76.184ms</title><rect x="1165.9" y="294.0" width="2.2" height="16" rx="2" fill="hsl(26,82%,57%)"/></g>
+<g><title>ksys_read
+125.381ms (0.27%)
+  network  49.197ms
+  futex    76.184ms</title><rect x="1165.9" y="277.0" width="2.2" height="16" rx="2" fill="hsl(26,82%,62%)"/></g>
+<g><title>vfs_read
+125.381ms (0.27%)
+  network  49.197ms
+  futex    76.184ms</title><rect x="1165.9" y="260.0" width="2.2" height="16" rx="2" fill="hsl(26,82%,62%)"/></g>
+<g><title>seq_read
+76.184ms (0.16%)
+  futex    76.184ms</title><rect x="1165.9" y="243.0" width="0.9" height="16" rx="2" fill="hsl(26,82%,61%)"/></g>
+<g><title>seq_read_iter
+76.184ms (0.16%)
+  futex    76.184ms</title><rect x="1165.9" y="226.0" width="0.9" height="16" rx="2" fill="hsl(26,82%,64%)"/></g>
+<g><title>proc_single_show
+76.184ms (0.16%)
+  futex    76.184ms</title><rect x="1165.9" y="209.0" width="0.9" height="16" rx="2" fill="hsl(26,82%,66%)"/></g>
+<g><title>proc_cgroup_show
+76.184ms (0.16%)
+  futex    76.184ms</title><rect x="1165.9" y="192.0" width="0.9" height="16" rx="2" fill="hsl(26,82%,63%)"/></g>
+<g><title>mutex_lock
+76.184ms (0.16%)
+  futex    76.184ms</title><rect x="1165.9" y="175.0" width="0.9" height="16" rx="2" fill="hsl(26,82%,58%)"/></g>
+<g><title>__mutex_lock_slowpath
+76.184ms (0.16%)
+  futex    76.184ms</title><rect x="1165.9" y="158.0" width="0.9" height="16" rx="2" fill="hsl(26,82%,59%)"/></g>
+<g><title>__mutex_lock.constprop.0
+76.184ms (0.16%)
+  futex    76.184ms</title><rect x="1165.9" y="141.0" width="0.9" height="16" rx="2" fill="hsl(26,82%,58%)"/></g>
+<g><title>schedule_preempt_disabled
+76.184ms (0.16%)
+  futex    76.184ms</title><rect x="1165.9" y="124.0" width="0.9" height="16" rx="2" fill="hsl(26,82%,68%)"/></g>
+<g><title>schedule
+76.184ms (0.16%)
+  futex    76.184ms</title><rect x="1165.9" y="107.0" width="0.9" height="16" rx="2" fill="hsl(26,82%,67%)"/></g>
+<g><title>__schedule
+76.184ms (0.16%)
+  futex    76.184ms</title><rect x="1165.9" y="90.0" width="0.9" height="16" rx="2" fill="hsl(26,82%,64%)"/></g>
+<g><title>__schedule
+76.184ms (0.16%)
+  futex    76.184ms</title><rect x="1165.9" y="73.0" width="0.9" height="16" rx="2" fill="hsl(26,82%,64%)"/></g>
+<g><title>sock_read_iter
+49.197ms (0.11%)
+  network  49.197ms</title><rect x="1167.9" y="243.0" width="0.4" height="16" rx="2" fill="hsl(209,68%,64%)"/></g>
+<g><title>sock_recvmsg
+49.197ms (0.11%)
+  network  49.197ms</title><rect x="1167.9" y="226.0" width="0.4" height="16" rx="2" fill="hsl(209,68%,59%)"/></g>
+<g><title>unix_stream_recvmsg
+49.197ms (0.11%)
+  network  49.197ms</title><rect x="1167.9" y="209.0" width="0.4" height="16" rx="2" fill="hsl(209,68%,58%)"/></g>
+<g><title>unix_stream_read_generic
+49.197ms (0.11%)
+  network  49.197ms</title><rect x="1167.9" y="192.0" width="0.4" height="16" rx="2" fill="hsl(209,68%,67%)"/></g>
+<g><title>schedule_timeout
+49.197ms (0.11%)
+  network  49.197ms</title><rect x="1167.9" y="175.0" width="0.4" height="16" rx="2" fill="hsl(209,68%,60%)"/></g>
+<g><title>schedule
+49.197ms (0.11%)
+  network  49.197ms</title><rect x="1167.9" y="158.0" width="0.4" height="16" rx="2" fill="hsl(209,68%,67%)"/></g>
+<g><title>__schedule
+49.197ms (0.11%)
+  network  49.197ms</title><rect x="1167.9" y="141.0" width="0.4" height="16" rx="2" fill="hsl(209,68%,64%)"/></g>
+<g><title>__schedule
+49.197ms (0.11%)
+  network  49.197ms</title><rect x="1167.9" y="124.0" width="0.4" height="16" rx="2" fill="hsl(209,68%,64%)"/></g>
+<g><title>runc:[2:INIT]
+818.251ms (1.77%)
+  futex    727.85ms
+  poll     37.093ms
+  sleep    53.308ms</title><rect x="1169.1" y="362.0" width="19.9" height="16" rx="2" fill="hsl(26,82%,59%)"/></g>
+<g><title>entry_SYSCALL_64_after_hwframe
+818.178ms (1.77%)
+  futex    727.777ms
+  poll     37.093ms
+  sleep    53.308ms</title><rect x="1169.1" y="345.0" width="19.9" height="16" rx="2" fill="hsl(26,82%,56%)"/></g>
+<g><title>do_syscall_64
+818.178ms (1.77%)
+  futex    727.777ms
+  poll     37.093ms
+  sleep    53.308ms</title><rect x="1169.1" y="328.0" width="19.9" height="16" rx="2" fill="hsl(26,82%,60%)"/></g>
+<g><title>x64_sys_call
+818.178ms (1.77%)
+  futex    727.777ms
+  poll     37.093ms
+  sleep    53.308ms</title><rect x="1169.1" y="311.0" width="19.9" height="16" rx="2" fill="hsl(26,82%,65%)"/></g>
+<g><title>__x64_sys_futex
+727.652ms (1.57%)
+  futex    727.652ms</title><rect x="1170.1" y="294.0" width="17.5" height="16" rx="2" fill="hsl(26,82%,66%)"/></g>
+<g><title>do_futex
+727.652ms (1.57%)
+  futex    727.652ms</title><rect x="1170.1" y="277.0" width="17.5" height="16" rx="2" fill="hsl(26,82%,64%)"/></g>
+<g><title>futex_wait
+727.652ms (1.57%)
+  futex    727.652ms</title><rect x="1170.1" y="260.0" width="17.5" height="16" rx="2" fill="hsl(26,82%,61%)"/></g>
+<g><title>futex_wait_queue
+727.652ms (1.57%)
+  futex    727.652ms</title><rect x="1170.1" y="243.0" width="17.5" height="16" rx="2" fill="hsl(26,82%,56%)"/></g>
+<g><title>schedule
+727.652ms (1.57%)
+  futex    727.652ms</title><rect x="1170.1" y="226.0" width="17.5" height="16" rx="2" fill="hsl(26,82%,67%)"/></g>
+<g><title>__schedule
+727.652ms (1.57%)
+  futex    727.652ms</title><rect x="1170.1" y="209.0" width="17.5" height="16" rx="2" fill="hsl(26,82%,64%)"/></g>
+<g><title>__schedule
+727.652ms (1.57%)
+  futex    727.652ms</title><rect x="1170.1" y="192.0" width="17.5" height="16" rx="2" fill="hsl(26,82%,64%)"/></g>
+<g><title>__x64_sys_nanosleep
+53.308ms (0.12%)
+  sleep    53.308ms</title><rect x="1188.6" y="294.0" width="0.4" height="16" rx="2" fill="hsl(212,12%,62%)"/></g>
+<g><title>hrtimer_nanosleep
+53.308ms (0.12%)
+  sleep    53.308ms</title><rect x="1188.6" y="277.0" width="0.4" height="16" rx="2" fill="hsl(212,12%,62%)"/></g>
+<g><title>do_nanosleep
+53.308ms (0.12%)
+  sleep    53.308ms</title><rect x="1188.6" y="260.0" width="0.4" height="16" rx="2" fill="hsl(212,12%,66%)"/></g>
+<g><title>schedule
+53.308ms (0.12%)
+  sleep    53.308ms</title><rect x="1188.6" y="243.0" width="0.4" height="16" rx="2" fill="hsl(212,12%,67%)"/></g>
+<g><title>__schedule
+53.308ms (0.12%)
+  sleep    53.308ms</title><rect x="1188.6" y="226.0" width="0.4" height="16" rx="2" fill="hsl(212,12%,64%)"/></g>
+<g><title>__schedule
+53.308ms (0.12%)
+  sleep    53.308ms</title><rect x="1188.6" y="209.0" width="0.4" height="16" rx="2" fill="hsl(212,12%,64%)"/></g>
+<text x="10" y="416.0" font-size="12" fill="#5c5c66">waiting on:</text>
+<rect x="89.2" y="406.0" width="11" height="11" rx="2" fill="hsl(209,68%,66%)"/><text x="105.2" y="416.0" font-size="12" fill="#16161a">network 0.1%</text>
+<rect x="213.2" y="406.0" width="11" height="11" rx="2" fill="hsl(26,82%,68%)"/><text x="229.2" y="416.0" font-size="12" fill="#16161a">futex 66.0%</text>
+<rect x="330.0" y="406.0" width="11" height="11" rx="2" fill="hsl(142,42%,61%)"/><text x="346.0" y="416.0" font-size="12" fill="#16161a">poll 1.3%</text>
+<rect x="432.4" y="406.0" width="11" height="11" rx="2" fill="hsl(212,12%,64%)"/><text x="448.4" y="416.0" font-size="12" fill="#16161a">sleep 32.5%</text>
+<rect x="549.2" y="406.0" width="11" height="11" rx="2" fill="hsl(45,34%,65%)"/><text x="565.2" y="416.0" font-size="12" fill="#16161a">other 0.0%</text>
+<text x="10" y="436.0" font-size="12" fill="#5c5c66">width is time spent stopped inside a frame, not time spent running it</text>
+</svg>
