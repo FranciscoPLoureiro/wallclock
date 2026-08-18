@@ -23,22 +23,19 @@ memory = "2G"
 # Every test here loads BPF programs and attaches them to tracepoints.
 user = "root"
 
-setup = [
-  # Not mounted in the guest image. Without it every cgroup path resolves to
-  # nothing, `preflight` refuses on cgroup v2, and the throttling half of this
-  # tool has nowhere to look.
-  "mount -t cgroup2 -o nosuid,noexec,nodev cgroup2 /sys/fs/cgroup",
-  # Mounting the hierarchy is not enough: a controller has to be delegated to
-  # children before any child cgroup can have a `cpu.max` at all. This is the
-  # line that makes the throttling scenario possible, and without it those
-  # tests fail for a reason that has nothing to do with the kernel version
-  # being tested.
-  "/bin/sh -c 'echo +cpu > /sys/fs/cgroup/cgroup.subtree_control || true'",
-  "dmesg --clear",
-]
-
-teardown = [
-  # A verifier rejection, an OOM kill or a page fault says so here and nowhere
-  # else. Printed on the way out so a failing job carries its own diagnosis.
-  "dmesg --read-clear",
-]
+# No setup and no teardown, and that is a finding rather than an omission.
+#
+# The obvious thing to put here is `mount -t cgroup2 ... /sys/fs/cgroup`,
+# which is what cilium/ebpf's own configuration does. It fails:
+#
+#     setup: mount: exec: "mount": executable file not found in $PATH
+#
+# The guest root is the host filesystem read-only *except* /usr and /lib,
+# which come from the kernel image -- and ci-kernels images carry a kernel and
+# its modules, not a userland. On a modern distro /bin is a symlink into /usr,
+# so every ordinary binary the setup might want is shadowed away: no mount, no
+# dmesg, and no shell to run them under.
+#
+# So whatever the guest provides has to already be there. `preflight` is what
+# reports which of it is, by attempting each requirement, and the matrix job
+# runs it before it asserts anything else.
