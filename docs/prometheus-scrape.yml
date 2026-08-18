@@ -1,0 +1,35 @@
+# Scraping wallclock's destination histogram.
+#
+# `wallclock destinations -serve ADDR` publishes one histogram per peer at
+# ADDR/metrics, in the Prometheus text exposition format. The counters are
+# cumulative from the moment the session opened, which is what rate() and
+# histogram_quantile() need -- a series that reset between scrapes would break
+# every query built on it.
+#
+# Add this to an existing prometheus.yml under scrape_configs.
+
+- job_name: wallclock
+  # Five seconds matches the rest of the ticket office stack. There is no cost
+  # to scraping faster than the data changes: each scrape reads BPF maps that
+  # are updated per packet, so the answer is always current.
+  scrape_interval: 5s
+  static_configs:
+    # wallclock runs on the host, not in a container, because it needs
+    # CAP_BPF and a view of every cgroup on the machine. So the target is
+    # wherever that host is reachable from Prometheus:
+    #
+    #   same machine, Prometheus on the host    localhost:9500
+    #   Prometheus in Docker on Linux           172.17.0.1:9500, or add
+    #                                           `extra_hosts: [host.docker.internal:host-gateway]`
+    #   Prometheus in Docker Desktop on Windows the WSL distribution's own
+    #                                           address -- `hostname -I` inside
+    #                                           it -- because host.docker.internal
+    #                                           resolves to the Windows host and
+    #                                           does not reach the distro
+    #
+    # That last case is the one this was developed against, and it is the one
+    # that fails confusingly: host.docker.internal answers, so the target is
+    # reachable-looking, and the connection is simply refused.
+    - targets: ["172.30.239.33:9500"]
+      labels:
+        service: wallclock

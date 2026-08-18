@@ -56,7 +56,7 @@ of them produce.
 | 3 | What the Go runtime makes invisible from the kernel's side | ✅ done |
 | 4 | Network time attributed to individual destinations | ✅ done — [in the shape phase 3 forced on it](#and-what-this-decided-about-phase-4) |
 | 5 | Validation against injected latency, and measured overhead | ✅ done |
-| 6 | Point it at a real service and answer a real question | planned |
+| 6 | Point it at a real service and answer a real question | ✅ done — [the answer](#pointing-it-at-the-question-it-was-built-for) |
 
 The question in phase 6 comes from the project this one grew out of:
 [High Concurrency Ticket Office](https://github.com/FranciscoPLoureiro/HighConcurrencyTicketOffice),
@@ -783,6 +783,123 @@ clients still shows them. The way to get a clean answer is to attach first and
 start the traffic afterwards, which is how the measurement above was taken —
 on the second attempt.
 
+### The histograms, in Grafana
+
+`wallclock destinations -serve :9500` publishes one histogram per peer in the
+Prometheus text exposition format, cumulative from the moment the session
+opened — which is what `rate()` and `histogram_quantile()` need. The scrape
+job is in [docs/prometheus-scrape.yml](docs/prometheus-scrape.yml) and the
+dashboard in [docs/grafana-dashboard.json](docs/grafana-dashboard.json).
+
+![wallclock destinations in Grafana](docs/grafana-destinations.png)
+
+Three things in that picture are decisions rather than defaults.
+
+**The latency panels have a traffic floor** — only destinations doing more
+than one exchange a second. Without it a single idle keep-alive connection,
+whose "round trip" is really a peer's think time, sits at two minutes and
+flattens every real series to zero. That happened on the first render, and the
+panel description says so rather than the filter being silent.
+
+**The exporter is pointed at one cgroup.** Watching the whole machine puts
+every ephemeral port on the box into the legend. `-cgroup` is not an
+optimisation here; it is what makes the dashboard readable.
+
+**Only Redis clears the floor in that window**, which is true rather than a
+rendering accident: at this load it takes several thousand exchanges a second
+and the other two take a few hundred in total. They are visible in the bottom
+panel, which is deliberately unfiltered — a destination with a high latency and
+two exchanges a second is a different problem from one with a low latency and
+ten thousand.
+
+One trap worth writing down, since it cost two renders: restarting a container
+gives it a **new cgroup inode under the same container id**. An exporter
+started before that restart then watches a cgroup nothing is in, and reports
+nothing at all — very convincingly, with no error anywhere.
+
+### Pointing it at the question it was built for
+
+**Context.** The project this one grew out of left a sentence in its README: at
+100 virtual users the p99 went from 153 ms to 291 ms once Prometheus and
+Grafana were sharing the machine, and it could not say where the difference
+went. That is a correlation. This section is what the tool says about it.
+
+**Framing, because it decides how to read the rest.** The deliverable is the
+tool and the method, not the verdict. A decomposition that closes to 100% is
+worth having whichever category wins, and the answer below is not the one the
+question implies.
+
+**Method.** The ticket office at 100 VUs, twice: once with Prometheus and
+Grafana stopped, once with them running, everything else identical and reset
+between runs. Both views of wallclock over both conditions, and — this matters
+— *the same profiling protocol in both*, because the profiler is not free and
+comparing a heavily observed run against a lightly observed one measures the
+observer.
+
+**The decomposition, side by side.** Seven consecutive 25-second windows in
+each condition, the busiest kept:
+
+| | without Prometheus & Grafana | with |
+|---|---|---|
+| threads | 5 | 6 |
+| thread-time | 1m58.08s | 2m15.49s |
+| on-CPU | 20.7% (24.39s) | 21.5% (29.12s) |
+| **runqueue** | **0.4% (442.7ms)** | **0.5% (704.6ms)** |
+| **throttled** | **0.1% (84.9ms)** | **0.1% (128.9ms)** |
+| blocked | 78.9% | 77.9% |
+
+**Neither of the two things this tool was built to separate is happening.**
+The API is not queued behind a full machine — runqueue delay is half a per
+cent — and it is not held off by its own cgroup quota, which is a tenth of
+one. Those are the two explanations that "the observability stack stole the
+CPU" would produce, and the decomposition rules out both. It also rules them
+out *in the same table*, which is the point of a closed account: there is
+nowhere else for the time to be hiding.
+
+**Where it actually went.** The destination view, same load, same protocol:
+
+| destination | without | with | change |
+|---|---|---|---|
+| redis, mean | 1.2 ms | 1.4 ms | +17% |
+| redis, p99 | 3.6 ms | 4.1 ms | +14% |
+| postgres, mean | 5.4 ms | 6.9 ms | +28% |
+| postgres, p99 | 81.9 ms | 114.7 ms | +40% |
+| rabbitmq, mean | 1.6 ms | 2.5 ms | +56% |
+| rabbitmq, p99 | 6.1 ms | 20.5 ms | **+236%** |
+
+**Every dependency answers more slowly, and the API itself does not change.**
+Whatever the observability containers took, they took it from PostgreSQL,
+Redis and RabbitMQ rather than from the service under test. That is not the
+answer the original sentence implies, and it is the more useful one: the fix
+it points at is where the dependencies run, not how much CPU the API is given.
+
+**What this does not establish, said plainly.** The dependency slow-downs are
+fractions of a millisecond per round trip, and they do not add up to the
+end-to-end difference. Part of the increase remains unaccounted for, and the
+honest reading of the tables above is *"the API is not the bottleneck and its
+dependencies are measurably slower"*, not *"here is a complete arithmetic of
+the extra milliseconds"*.
+
+**And a confounder worth publishing rather than hiding.** The end-to-end
+figures moved with how much profiling was attached:
+
+| condition | observation running | requests/s | mean |
+|---|---|---|---|
+| without | destinations only | 3 577 | 24.18 ms |
+| without | one 20 s profile | 3 366 | 25.68 ms |
+| without | seven 25 s profiles | 3 030 | 28.53 ms |
+| with | destinations only | 2 957 | 29.27 ms |
+| with | seven 25 s profiles | 2 959 | 29.25 ms |
+
+Under the light protocol the gap between conditions is 17% of throughput;
+under the heavy one it is 2%. Both numbers are real and they describe
+different experiments. The matched pairs above are the ones to read, and the
+[overhead curve](#how-this-was-validated-and-what-it-costs) is where the cost
+of the tool itself is measured properly. Reproducibility within a condition is
+good — two independent runs of the loaded case gave 2 957 and 2 959 requests a
+second — which is what makes the disagreement between protocols a real effect
+rather than noise.
+
 ### How this was validated, and what it costs
 
 **Context.** A measuring tool that has not been measured is an opinion. Every
@@ -1383,6 +1500,68 @@ the price of the answer being true. It also has to be run as root to be
 conclusive, so an unprivileged run reports a failure that is really "ask
 again with privileges"; the consequence text says so rather than leaving the
 reader to work it out.
+
+## What this does not measure
+
+A limitations section written properly earns more trust than its absence, and
+most of these were found by measuring rather than by guessing. Every one has a
+number or a mechanism behind it somewhere above.
+
+**A thread that never leaves its CPU is never seen.** This tool learns of a
+thread from scheduler events. A thread that holds a core for the whole window
+produces none, and does not appear at all — not as a zero, as an absence. The
+same is true of a thread that was already asleep when profiling started and
+never wakes.
+
+**Go's network waiting is not here, and neither is anyone else's event loop.**
+A goroutine parked in the netpoller stops no thread, so it costs no blocked
+time. PostgreSQL backends and Redis wait in `epoll` for the same effect.
+[Measured](#the-go-execution-model-and-what-it-hides-from-the-kernel): across a
+whole machine under load, six threads recorded any network-blocked time at
+all, 164 ms between them, every one a short-lived one-shot client.
+`destinations` exists because of this and answers a different question — how
+long a peer took, not how long a thread waited.
+
+**Futex time is ambiguous and cannot be disambiguated from here.** An idle Go
+M parked in `notesleep` and a goroutine stopped on a contended mutex are the
+same `futex_wait` on an address the kernel cannot interpret. A mostly-idle
+thread pool and a badly contended one look identical.
+
+**"Blocked 96%" is not latency.** A process's decomposition is in
+thread-seconds. Sixteen mostly-idle threads report the same 96% whether the
+service handled a million requests or none.
+
+**Percentiles are bucket ceilings.** Four buckets to the octave, so a reported
+p99 is at or below the true one by up to 25%. Means are exact; percentiles are
+not interpolated, deliberately.
+
+**Round trips are pairings, not parsed protocol.** `destinations` pairs a send
+with the next receive on the same connection. A connection that streams one
+way, or pipelines several requests before reading any reply, is measured as
+something else. Inbound connections accepted *before* profiling started are
+not recognised as inbound and appear as destinations.
+
+**16 384 threads between reads.** Beyond that the map is full and events are
+dropped — [counted and reported](#how-this-was-validated-and-what-it-costs),
+never silently. Event *rate* is not the limit: a quarter of a million context
+switches a second loses nothing.
+
+**It costs something.** 5.7% of throughput at 74 000 context switches a
+second, against a 0.8% noise floor. Above roughly a hundred thousand the
+measurement method can no longer resolve the profiler at all, which is stated
+rather than filled in with a number.
+
+**Kernels and permissions.** Linux 5.8 or newer with `CONFIG_DEBUG_INFO_BTF=y`
+and cgroup v2; root, or `CAP_BPF` and `CAP_PERFMON`. No BTF means no CO-RE and
+nothing loads — BTFHub-style external blobs are a real answer this project
+does not implement. IPv4 only in `destinations`. x86-64 only, tested on two
+kernels: 6.6 locally and 6.17 in CI, [the same binary on both](#co-re-not-bcc).
+Full details in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
+**Inside a pid namespace, `-pid` is refused rather than wrong.** The kernel
+numbers pids in the initial namespace and a container numbers them differently.
+The tool checks and stops; `-cgroup` is the filter that means the same thing
+everywhere.
 
 ## Requirements
 

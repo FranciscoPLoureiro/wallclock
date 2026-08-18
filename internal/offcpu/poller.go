@@ -84,9 +84,19 @@ type Poller struct {
 // seen exactly once, in epoll, has a ratio of 1.0 on a single row and would
 // drag a maximum-over-threads test to "dedicated" on the strength of a
 // microsecond. Weighting by time makes a thread's vote worth what it waited.
+//
+// The per-thread bar is 80%, and the first version had it at half, which CI
+// found: on a loaded four-CPU runner the Go runtime kept a pool of six and one
+// of them happened to spend 50.6% of a short window's waiting in the poller,
+// so a plainly rotating runtime was called dedicated by six tenths of a point.
+// Half was a guess. The measurements say where the gap actually is -- a thread
+// that *is* an event loop spends 96% of its blocked time there (Redis) or
+// 99.5% (a PostgreSQL backend), and a Go M spends 5 to 7% at rest and 51% at
+// the worst seen. Eighty per cent sits in the middle of a forty-five point
+// gap instead of on the edge of the noise.
 const (
 	rotatingMinThreads    = 3
-	dedicatedThreadShare  = 0.5
+	dedicatedThreadShare  = 0.8
 	rotatingMaxDedication = 0.5
 )
 
