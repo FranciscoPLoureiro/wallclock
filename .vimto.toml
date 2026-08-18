@@ -1,0 +1,48 @@
+# How the QEMU guest that the kernel matrix boots is set up.
+#
+# vimto is the cilium/ebpf project's tool and these are its kernel images, so
+# the shape of this file follows theirs. What differs is what this tool needs
+# from a kernel, which is more than a library that only loads programs.
+
+# The default. The matrix overrides the tag per job with `-kernel :6.6`, which
+# substitutes into this url rather than replacing it -- a bare `:6.6` with no
+# url configured is an error, and the error says "missing colon", which is not
+# the problem.
+kernel = "ghcr.io/cilium/ci-kernels:stable"
+
+# Four, because half of what this tool measures only exists when threads
+# compete: runqueue delay is threads waiting for a CPU that is busy, and on
+# one CPU every measurement collapses into the same number. Four is what a
+# hosted runner has to give, so it is the ceiling rather than a choice.
+smp = "cpus=4"
+
+# The tests create a few hundred threads between them and read a 100 000 line
+# kallsyms.
+memory = "2G"
+
+# Every test here loads BPF programs and attaches them to tracepoints.
+user = "root"
+
+setup = [
+  # Not mounted in the guest image. Without it every cgroup path resolves to
+  # nothing, `preflight` refuses on cgroup v2, and the throttling half of this
+  # tool has nowhere to look.
+  "mount -t cgroup2 -o nosuid,noexec,nodev cgroup2 /sys/fs/cgroup",
+  # Mounting the hierarchy is not enough: a controller has to be delegated to
+  # children before any child cgroup can have a `cpu.max` at all. This is the
+  # line that makes the throttling scenario possible, and without it those
+  # tests fail for a reason that has nothing to do with the kernel version
+  # being tested.
+  "/bin/sh -c 'echo +cpu > /sys/fs/cgroup/cgroup.subtree_control || true'",
+  # Stack traces are named from here. A missing kallsyms turns every blocked
+  # reason into `other`, which is a plausible-looking report rather than an
+  # error.
+  "/bin/sh -c 'mount -t proc proc /proc 2>/dev/null || true'",
+  "dmesg --clear",
+]
+
+teardown = [
+  # A verifier rejection, an OOM kill or a page fault says so here and nowhere
+  # else. Printed on the way out so a failing job carries its own diagnosis.
+  "dmesg --read-clear",
+]
