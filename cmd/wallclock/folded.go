@@ -80,9 +80,27 @@ func describeSubject(target string, window time.Duration, comm, cgroup string) s
 		parts = append(parts, fmt.Sprintf("named like %q", comm))
 	}
 	if cgroup != "" {
-		parts = append(parts, "in "+cgroup)
+		parts = append(parts, "in "+shortenCgroup(cgroup))
 	}
 	return fmt.Sprintf("%s, over %s", strings.Join(parts, ", "), window)
+}
+
+// shortenCgroup abbreviates a container id in a cgroup path, the way every
+// other tool that has to print one does.
+//
+// A container id is sixty-four hex characters and only the first twelve
+// distinguish it from anything else on the machine. Printed in full it is
+// most of the line above a picture that has a width budget, and it is an
+// identifier rather than information -- by the time anybody reads the image,
+// that container has been gone for months. Ellipsised rather than silently
+// cut, so nobody mistakes the short form for the whole thing.
+func shortenCgroup(path string) string {
+	cut := strings.LastIndexByte(path, '/')
+	name := path[cut+1:]
+	if len(name) <= 16 {
+		return path
+	}
+	return path[:cut+1] + name[:12] + "…"
 }
 
 // writeFile creates a file, hands it to write, and closes it -- checking the

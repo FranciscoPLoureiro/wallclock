@@ -91,3 +91,51 @@ func TestFoldedStacksComeOutLongestFirst(t *testing.T) {
 		t.Errorf("not sorted by duration:\n%s", out.String())
 	}
 }
+
+// The subtitle is the only thing that travels with the picture, so what it
+// says about the subject has to survive being the only context there is.
+func TestTheSubtitleNamesWhatWasProfiled(t *testing.T) {
+	tests := []struct {
+		name                 string
+		target, comm, cgroup string
+		window               time.Duration
+		want                 string
+	}{
+		{
+			name:   "no filters",
+			target: "every thread",
+			window: 15 * time.Second,
+			want:   "every thread, over 15s",
+		},
+		{
+			name:   "a container id is abbreviated, not printed whole",
+			target: "every thread",
+			cgroup: "/sys/fs/cgroup/docker/" + strings.Repeat("a", 64),
+			window: 25 * time.Second,
+			want:   "every thread, in /sys/fs/cgroup/docker/aaaaaaaaaaaa…, over 25s",
+		},
+		{
+			name:   "a short cgroup name is left alone",
+			target: "every thread",
+			cgroup: "/sys/fs/cgroup/system.slice",
+			window: time.Minute,
+			want:   "every thread, in /sys/fs/cgroup/system.slice, over 1m0s",
+		},
+		{
+			name:   "every filter at once",
+			target: "pid 42 and its threads",
+			comm:   "api",
+			cgroup: "/sys/fs/cgroup/docker/" + strings.Repeat("b", 64),
+			window: 8 * time.Second,
+			want:   `pid 42 and its threads, named like "api", in /sys/fs/cgroup/docker/bbbbbbbbbbbb…, over 8s`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := describeSubject(tc.target, tc.window, tc.comm, tc.cgroup)
+			if got != tc.want {
+				t.Errorf("describeSubject:\n got %q\nwant %q", got, tc.want)
+			}
+		})
+	}
+}
