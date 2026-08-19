@@ -83,9 +83,16 @@ func TestTheDecompositionHoldsUnderCrossCPUWakeups(t *testing.T) {
 				t.Errorf("thread %d (%s): %s is %v, which is not a length of time",
 					thread.TID, thread.Comm, name, d)
 			}
-			if d > thread.Observed {
-				t.Errorf("thread %d (%s): %s is %v out of %v observed",
-					thread.TID, thread.Comm, name, d, thread.Observed)
+			// Against the same tolerance the residual is held to, because it
+			// is the same skew: these threads are blocked for nearly the whole
+			// window, so what the map read misses lands almost entirely in one
+			// component. Compared strictly, a skew forgiven by the residual
+			// check three lines up would fail here on the same numbers.
+			if d > thread.Observed+offcpu.ReadSkewTolerance {
+				t.Errorf("thread %d (%s): %s is %v out of %v observed, past the "+
+					"%v a live map read explains",
+					thread.TID, thread.Comm, name, d, thread.Observed,
+					offcpu.ReadSkewTolerance)
 			}
 		}
 	}
