@@ -20,6 +20,19 @@ concurrency:
 permissions:
   contents: read
 
+# Every `run:` step gets `bash --noprofile --norc -eo pipefail` instead of the
+# default `bash -e`, and the difference is pipefail.
+#
+# Without it a pipeline exits with the status of its *last* command, so
+# `wallclock preflight | tee -a "$GITHUB_STEP_SUMMARY"` below reports what tee
+# did, which is succeed. That step carries a comment saying it fails on a
+# runner that cannot run this project, and it could not fail at all -- a check
+# incapable of failing, in a repository whose recurring lesson is exactly
+# that.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   verify:
     name: build, lint and test
@@ -130,6 +143,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang llvm libbpf-dev
 
       - name: Record what kernel this runner is
+        # Never allowed to fail the job, and that matters more now that
+        # pipefail is on: the loop below pipes `cat` into `sed` over tracepoint
+        # format files, and a tracepoint that stopped existing would take the
+        # whole job down instead of leaving a gap in the notes. This step is
+        # here to make failures diagnosable; it must not be able to cause one.
+        continue-on-error: true
         # Recorded because the runner image changes without asking, and when a
         # load starts failing the first question is what moved. An assertion
         # that passed against an unrecorded kernel is not evidence of much.

@@ -127,10 +127,86 @@ when the previous value was written down.
 - **Only x86-64 is exercised.** The BPF objects are compiled with
   `-D__TARGET_ARCH_x86` and the include path is resolved from `uname -m`.
   arm64 should follow from changing both, and has not been tried.
-- **No second kernel in CI.** A hosted runner gives one kernel. Testing a
-  second means QEMU with pre-built kernel images, which is what the upstream
-  BPF CI does; until then, compatibility below 6.6 is reasoned from the
-  feature-to-version map above and not measured.
+- **Two kernels are exercised and neither of them was chosen.** They are
+  whatever the development machine and the hosted runner happen to be. Nothing
+  below 6.6 has ever run this code, so compatibility down to the stated 5.8
+  floor is reasoned from the feature-to-version map above rather than
+  measured. A QEMU matrix was built to close that gap and did not land; the
+  attempt is written up below, because "not done" and "not attempted" are
+  different claims.
 - **cgroup v1 is not supported and is not detected gracefully beyond the
   check.** The tool refuses to start rather than silently reporting numbers
   that mean something different.
+
+## The QEMU matrix that did not land
+
+The plan was the one the upstream BPF projects use: boot pre-built kernel
+images under QEMU and run the kernel-dependent tests inside. `vimto` and
+`ghcr.io/cilium/ci-kernels`, which is how cilium/ebpf — the library this is
+built on — runs its own CI. Six kernels: 5.10, 5.15, 6.1, 6.6, stable, and 5.4
+below the stated floor, where the assertion inverts and the tool has to refuse.
+
+Seven CI rounds later it does not work, and this is what was established.
+
+**What works.** The VM boots and runs its init: one round got as far as
+executing a setup command and failing inside it, in ninety seconds. So the
+image pulls, QEMU starts, and the guest reaches userspace.
+
+**What does not.** Running the tool inside it never returns. Not an error — a
+wait, ended only by the deadline. That is true with the binary built static,
+with no guest setup at all, and for both `preflight` and `go test`.
+
+**Four things about the guest that are not in vimto's README**, each of which
+cost a round:
+
+- `-kernel :6.6` alone is not a kernel reference; the tag substitutes into a
+  url that has to be configured, and without one it fails with `no tag in
+  image (missing colon)` — an error about the argument that was correct.
+- vimto dispatches on its first argument. Anything that is not `exec`,
+  `flush-cache` or a `go` invocation is `unknown command "./bin/wallclock"`,
+  which reads as the binary being missing.
+- `exec` requires vimto itself to be statically linked, because it copies
+  itself into the guest as init.
+- **The guest takes `/usr` and `/lib` from the kernel image**, and only `/`
+  from the host, read-only. A ci-kernels image carries a kernel and its
+  modules, not a userland, so there is no `mount`, no `dmesg`, and no shell to
+  run them under. Every setup line copied from a working configuration fails
+  with `executable file not found in $PATH`.
+
+And a fifth about this project rather than about vimto: an ordinary `go build`
+here links against the host libc — `ldd bin/wallclock` lists `libc.so.6` — and
+the guest has no libc to link against. The binary does not fail, it never
+starts. `CGO_ENABLED=0` fixes that and did not fix the hang.
+
+**What is not established** is why it still hangs. Candidates not ruled out:
+the runner's KVM support being unusable in a way that makes the guest too slow
+rather than broken; vimto's result channel, which failed once with `decode
+execution result: EOF`; something about how the binary is shared into the
+guest. Naming them is not the same as knowing.
+
+**Two things the attempt found that had nothing to do with kernels**, which is
+why it is documented rather than deleted:
+
+- A step in this repository's CI **could not fail**, and had not been able to
+  since the first day. `wallclock preflight | tee -a "$GITHUB_STEP_SUMMARY"`
+  exits with the status of `tee`, and the comment above it claimed it failed
+  on a host that could not run the project. Found because the matrix failed
+  three commands in one job and two of the three steps went green.
+- The refusal test **passed on a hang**. The deadline killed QEMU with status
+  124, the pattern matching the refusal message accepted the bare word
+  "kernel", and that word appears in the timeout message. Green, with the tool
+  never having run.
+
+Both are the same defect in different clothes, and it is this project's
+recurring one: the dangerous check is not the one that fails, it is the one
+that cannot. A test of a *refusal* is especially exposed, because nearly
+everything that can go wrong also exits non-zero — so "it failed" is not
+evidence that it failed for the stated reason.
+
+**Where this leaves the criterion.** The brief for this project offers the
+alternative explicitly: build the QEMU matrix, or lower the bar to a second
+kernel tested by hand and documented. This is the second, and the table above
+is what it amounts to — two kernels eleven minor versions apart, differing in
+`task_struct` size, both exercised on every pull request, with the CO-RE
+argument stated as a measurement. What is missing, and worth being plain
+about, is anything below 6.6.
