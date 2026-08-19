@@ -114,8 +114,18 @@ func startPingPong(t *testing.T, wg *sync.WaitGroup, stop <-chan struct{}) {
 		// Pinned, so that the thread the kernel sees is the thread this
 		// goroutine keeps. Unpinned, the runtime is free to move the work and
 		// the entry being contended is no longer the same one.
+		//
+		// Deliberately never unlocked, so that a goroutine which exits takes
+		// its thread with it rather than handing back one carrying every
+		// syscall of CPU this loop spent on it.
+		//
+		// That is hygiene and it is not sufficient: the runtime spins up
+		// threads of its own to run these goroutines, and those persist with
+		// their history whatever this does. Adding this test made the on-CPU
+		// cross-check fail at a ratio of 0.57 for exactly that reason, and
+		// the fix belongs there -- it compares a difference across its window
+		// now, instead of a total that included somebody else's CPU.
 		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
 
 		buf := make([]byte, 1)
 		if opener {

@@ -92,17 +92,29 @@ func TestOnCPUAgreesWithTheKernelsOwnAccounting(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// Named and pinned first, then straight into the loop, so that this
-		// thread has almost no history before the interval being compared.
-		// Both measurements then start from about zero and the absolute
-		// values are comparable without having to align two "before" reads.
 		nameThisThread(t, name)
 		defer runtime.UnlockOSThread()
 
+		// Read before and after, and compare the difference.
+		//
+		// This used to take one reading after the spin and use it whole, on
+		// the stated grounds that a freshly pinned thread has almost no
+		// history behind it. Go does not promise that and does not do it: it
+		// hands out threads it already has, carrying whatever the last
+		// goroutine on them spent. The assumption held only while nothing
+		// earlier in this binary burned much CPU, and it stopped holding the
+		// moment something did -- /proc reported 1.64s of CPU for a thread
+		// that had just spun for 900ms, this tool reported 893ms, and the
+		// test called the tool wrong.
+		//
+		// The session's number is a difference across its window. Comparing
+		// it against a difference across the same window is the like for like
+		// the ratio was always meant to be.
+		before := threadCPUTime(t)
 		deadline := time.Now().Add(spin)
 		for time.Now().Before(deadline) { //nolint:revive // burning CPU is the point
 		}
-		kernelSays = threadCPUTime(t)
+		kernelSays = threadCPUTime(t) - before
 	}()
 	<-done
 
