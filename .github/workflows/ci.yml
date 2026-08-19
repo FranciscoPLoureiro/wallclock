@@ -53,9 +53,22 @@ jobs:
         # libbpf-dev supplies the bpf_helpers.h the programs include. The
         # runner image already carries a clang, but not necessarily an
         # unversioned llvm-strip, and not libbpf's headers.
+        #
+        # Bounded, because unbounded is how this fails. apt waits on a
+        # stalled mirror for as long as the mirror likes; twice in a row two
+        # of the three jobs sat in this step until timeout-minutes killed
+        # them, and GitHub reports a job killed that way as `cancelled` --
+        # which the README badge renders as failing, on a green commit.
+        #
+        # The retries and the per-connection timeout turn an indefinite stall
+        # into an error with a message. The step timeout is the backstop for
+        # anything they do not cover: five minutes is generous for three
+        # packages, and it fails this step rather than eating the job.
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang llvm libbpf-dev
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          sudo apt-get $apt_opts update
+          sudo apt-get $apt_opts install -y --no-install-recommends clang llvm libbpf-dev
 
       - name: Verify go.mod is tidy
         # A stale go.mod passes locally and fails for the next person to
@@ -99,9 +112,21 @@ jobs:
           cache: true
 
       - name: Install the BPF toolchain
+        # Bounded, because unbounded is how this fails. apt waits on a
+        # stalled mirror for as long as the mirror likes; twice in a row two
+        # of the three jobs sat in this step until timeout-minutes killed
+        # them, and GitHub reports a job killed that way as `cancelled` --
+        # which the README badge renders as failing, on a green commit.
+        #
+        # The retries and the per-connection timeout turn an indefinite stall
+        # into an error with a message. The step timeout is the backstop for
+        # anything they do not cover: five minutes is generous for three
+        # packages, and it fails this step rather than eating the job.
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang llvm libbpf-dev
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          sudo apt-get $apt_opts update
+          sudo apt-get $apt_opts install -y --no-install-recommends clang llvm libbpf-dev
 
       - name: Regenerate
         run: make generate
@@ -138,9 +163,21 @@ jobs:
           cache: true
 
       - name: Install the BPF toolchain
+        # Bounded, because unbounded is how this fails. apt waits on a
+        # stalled mirror for as long as the mirror likes; twice in a row two
+        # of the three jobs sat in this step until timeout-minutes killed
+        # them, and GitHub reports a job killed that way as `cancelled` --
+        # which the README badge renders as failing, on a green commit.
+        #
+        # The retries and the per-connection timeout turn an indefinite stall
+        # into an error with a message. The step timeout is the backstop for
+        # anything they do not cover: five minutes is generous for three
+        # packages, and it fails this step rather than eating the job.
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang llvm libbpf-dev
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          sudo apt-get $apt_opts update
+          sudo apt-get $apt_opts install -y --no-install-recommends clang llvm libbpf-dev
 
       - name: Record what kernel this runner is
         # Never allowed to fail the job, and that matters more now that
