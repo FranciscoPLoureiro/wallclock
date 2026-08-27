@@ -10,6 +10,7 @@ import (
 
 	"github.com/FranciscoPLoureiro/wallclock/internal/kerneltest"
 	"github.com/FranciscoPLoureiro/wallclock/internal/offcpu"
+	"github.com/FranciscoPLoureiro/wallclock/internal/spin"
 )
 
 // The quota this test imposes: 20 ms of CPU in every 100 ms period.
@@ -232,9 +233,9 @@ func startSpinner(t *testing.T, name string) *spinner {
 	t.Helper()
 
 	binary := filepath.Join(t.TempDir(), name)
-	shell, err := os.ReadFile("/bin/dash")
+	shell, _, err := spin.Shell()
 	if err != nil {
-		t.Skipf("no /bin/dash to copy as the spinner: %v", err)
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(binary, shell, 0o755); err != nil { //nolint:gosec // it has to be executable
 		t.Fatalf("writing the spinner binary: %v", err)

@@ -38,8 +38,19 @@ KERNEL_TEST_DIRS := internal/bpfload internal/syscount internal/offcpu internal/
 #
 # -Werror because a warning in a BPF program is usually the verifier's
 # rejection arriving early, and early is cheaper.
+#
+# The include path is added only where it exists. Debian and Ubuntu keep the
+# architecture headers under a multiarch directory that a cross-compilation
+# target does not search by default, and without it the build fails with
+# "asm/types.h file not found" -- which reads like a missing package and is
+# not one. No other distribution has that directory: Arch, Fedora and Red Hat
+# put those headers straight in /usr/include, which is already searched. The
+# flag used to be passed unconditionally, and the comment above it described
+# as necessary something that is necessary on one family and inert on the
+# rest.
+MULTIARCH := /usr/include/$(shell uname -m)-linux-gnu
 BPF_CFLAGS := -target bpf -D__TARGET_ARCH_x86 \
-	-I/usr/include/$(shell uname -m)-linux-gnu \
+	$(if $(wildcard $(MULTIARCH)),-I$(MULTIARCH)) \
 	-O2 -g -Wall -Werror
 
 # Loading a program needs root. When make is already running as root -- which
