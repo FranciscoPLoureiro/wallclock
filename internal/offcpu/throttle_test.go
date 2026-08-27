@@ -10,6 +10,7 @@ import (
 
 	"github.com/FranciscoPLoureiro/wallclock/internal/kerneltest"
 	"github.com/FranciscoPLoureiro/wallclock/internal/offcpu"
+	"github.com/FranciscoPLoureiro/wallclock/internal/preflight"
 	"github.com/FranciscoPLoureiro/wallclock/internal/spin"
 )
 
@@ -145,6 +146,14 @@ func newTestCgroup(t *testing.T) *testCgroup {
 	t.Helper()
 
 	const root = "/sys/fs/cgroup"
+	// Asked first, because every failure below it reads as a permissions or
+	// delegation problem and on a kernel with no CFS bandwidth control none
+	// of them is. "cannot set cpu.max" sends the reader to check delegation;
+	// the truth is that the file cannot exist here at all.
+	if !preflight.ThrottlingObservable() {
+		t.Skip("this kernel has no CFS bandwidth control, so no cgroup can be " +
+			"throttled and there is no quota to set")
+	}
 	if err := enableCPUController(root); err != nil {
 		t.Skipf("the cpu controller is not delegated here, so a quota cannot be "+
 			"set: %v", err)

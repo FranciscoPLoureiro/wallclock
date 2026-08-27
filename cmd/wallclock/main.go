@@ -80,8 +80,15 @@ func runPreflight(out *os.File) error {
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "requirement\tstatus\tfound")
 	for _, c := range report.Checks {
+		// Three states rather than two. A missing optional capability is not
+		// a failure -- the tool starts and runs -- but printing it as "ok"
+		// would say the host has something it does not.
 		status := "ok"
-		if !c.OK {
+		switch {
+		case c.OK:
+		case c.Optional:
+			status = "absent"
+		default:
 			status = "FAIL"
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\n", c.Name, status, c.Detail)
@@ -93,6 +100,15 @@ func runPreflight(out *os.File) error {
 	// The consequences are printed only for what failed. Printing all of them
 	// every time would bury the one line that matters on the host where it
 	// matters.
+	// Degraded capabilities are printed before the verdict and never change
+	// it. They are printed even on a host that passes, because the run that
+	// needs this line is the one where everything looks fine and one column
+	// of the report will be empty for a reason nobody was told.
+	for _, c := range report.Degraded() {
+		fmt.Fprintf(out, "\n%s is absent, and wallclock runs without it.\n  %s\n",
+			c.Name, wrap(c.Consequence, 72, "  "))
+	}
+
 	failed := report.Failed()
 	if len(failed) == 0 {
 		fmt.Fprintln(out, "\nall requirements met")
@@ -102,7 +118,7 @@ func runPreflight(out *os.File) error {
 	for _, c := range failed {
 		fmt.Fprintf(out, "%s is not satisfied.\n  %s\n", c.Name, wrap(c.Consequence, 72, "  "))
 	}
-	return fmt.Errorf("%d of %d requirements not met", len(failed), len(report.Checks))
+	return fmt.Errorf("%d of %d requirements not met", len(failed), report.Requirements())
 }
 
 func runLoad(out *os.File, path string) error {

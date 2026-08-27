@@ -246,6 +246,17 @@ func runProfile(args []string) error {
 	}
 	fmt.Fprintln(os.Stdout)
 
+	// Said after the table rather than instead of it. The column is real and
+	// its zeroes are honest -- nothing on this host can be throttled -- but a
+	// reader who does not know that reads a measured zero, concludes the
+	// quota is not the problem, and is right by accident. The same table on a
+	// kernel that can throttle would mean something the reader could act on.
+	if !session.ThrottlingObservable() {
+		fmt.Fprintln(os.Stdout,
+			"throttled is unavailable: this kernel has no CFS bandwidth control, so a\n"+
+				"cgroup here cannot be throttled and the column is not a measurement")
+	}
+
 	// The books have to balance, and saying so is cheap. A decomposition
 	// that quietly failed to add up would be indistinguishable from one that
 	// did, which is the failure this whole project is arranged against.
