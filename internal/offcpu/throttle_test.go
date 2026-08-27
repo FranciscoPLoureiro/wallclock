@@ -10,6 +10,8 @@ import (
 
 	"github.com/FranciscoPLoureiro/wallclock/internal/kerneltest"
 	"github.com/FranciscoPLoureiro/wallclock/internal/offcpu"
+	"github.com/FranciscoPLoureiro/wallclock/internal/preflight"
+	"github.com/FranciscoPLoureiro/wallclock/internal/spin"
 )
 
 // The quota this test imposes: 20 ms of CPU in every 100 ms period.
@@ -144,6 +146,14 @@ func newTestCgroup(t *testing.T) *testCgroup {
 	t.Helper()
 
 	const root = "/sys/fs/cgroup"
+	// Asked first, because every failure below it reads as a permissions or
+	// delegation problem and on a kernel with no CFS bandwidth control none
+	// of them is. "cannot set cpu.max" sends the reader to check delegation;
+	// the truth is that the file cannot exist here at all.
+	if !preflight.ThrottlingObservable() {
+		t.Skip("this kernel has no CFS bandwidth control, so no cgroup can be " +
+			"throttled and there is no quota to set")
+	}
 	if err := enableCPUController(root); err != nil {
 		t.Skipf("the cpu controller is not delegated here, so a quota cannot be "+
 			"set: %v", err)
@@ -232,9 +242,9 @@ func startSpinner(t *testing.T, name string) *spinner {
 	t.Helper()
 
 	binary := filepath.Join(t.TempDir(), name)
-	shell, err := os.ReadFile("/bin/dash")
+	shell, _, err := spin.Shell()
 	if err != nil {
-		t.Skipf("no /bin/dash to copy as the spinner: %v", err)
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(binary, shell, 0o755); err != nil { //nolint:gosec // it has to be executable
 		t.Fatalf("writing the spinner binary: %v", err)

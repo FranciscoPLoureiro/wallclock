@@ -38,8 +38,19 @@ KERNEL_TEST_DIRS := internal/bpfload internal/syscount internal/offcpu internal/
 #
 # -Werror because a warning in a BPF program is usually the verifier's
 # rejection arriving early, and early is cheaper.
+#
+# The include path is added only where it exists. Debian and Ubuntu keep the
+# architecture headers under a multiarch directory that a cross-compilation
+# target does not search by default, and without it the build fails with
+# "asm/types.h file not found" -- which reads like a missing package and is
+# not one. No other distribution has that directory: Arch, Fedora and Red Hat
+# put those headers straight in /usr/include, which is already searched. The
+# flag used to be passed unconditionally, and the comment above it described
+# as necessary something that is necessary on one family and inert on the
+# rest.
+MULTIARCH := /usr/include/$(shell uname -m)-linux-gnu
 BPF_CFLAGS := -target bpf -D__TARGET_ARCH_x86 \
-	-I/usr/include/$(shell uname -m)-linux-gnu \
+	$(if $(wildcard $(MULTIARCH)),-I$(MULTIARCH)) \
 	-O2 -g -Wall -Werror
 
 # Loading a program needs root. When make is already running as root -- which
@@ -143,6 +154,24 @@ smoke: bpf build ## Run every test that needs a real kernel (needs root)
 	done
 	$(SUDO) $(BIN) load $(firstword $(BPF_OBJ))
 	$(SUDO) $(BIN) load $(firstword $(BPF_OBJ))
+
+.PHONY: matrix
+matrix: bpf ## Load and test on a range of kernels under QEMU (no root needed)
+	# No sudo. /dev/kvm is world-readable on an ordinary desktop and the root
+	# these tests need is root inside the guest, which vimto provides. The one
+	# thing this does need is working KVM: without it QEMU falls back to
+	# software emulation and the guests are slow enough to be indistinguishable
+	# from hung, which is how the first attempt at this matrix failed seven CI
+	# rounds running.
+	bash scripts/kernel-matrix.sh
+
+.PHONY: distro-matrix
+distro-matrix: bpf ## Same, against the kernels distributions actually ship
+	# Slower and heavier than `matrix`, and it answers something that one
+	# cannot: the ci-kernels images are built without CONFIG_CFS_BANDWIDTH, so
+	# they can prove the programs load and attach but can never throttle a
+	# cgroup -- the category this tool exists to separate. These images can.
+	bash scripts/distro-matrix.sh
 
 FLAME_WINDOW ?= 20s
 

@@ -118,6 +118,10 @@ func TestABlockedSocketReadIsClassifiedAsNetwork(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Skipf("ping is unavailable or refused here: %v", err)
 	}
+	// Single-threaded, so its tid is its pid, and it is the subject this test
+	// is entitled to make claims about.
+	pingTID := uint32(cmd.Process.Pid) //nolint:gosec // a pid fits
+
 	time.Sleep(50 * time.Millisecond)
 
 	blocked, err := session.BlockedReasons(symbols)
@@ -132,23 +136,41 @@ func TestABlockedSocketReadIsClassifiedAsNetwork(t *testing.T) {
 		t.Fatalf("attributing open waits: %v", err)
 	}
 
+	// The subject is identified by tid, not by hoping a distinctive symbol
+	// turns up in the stack. The earlier version of this test required a
+	// frame called ping_recvmsg or inet_recvmsg, and both of those are
+	// choices the kernel build makes rather than facts about the wait:
+	// inet_recvmsg is inlined away on 6.13 and later, and which of the two
+	// appears at all depends on whether ping got a raw socket or an ICMP
+	// datagram socket, which depends on whether it was running as root. The
+	// test then failed on a kernel where the classification was perfectly
+	// correct -- reported network, 100% of the wait -- because a static
+	// function had been inlined. Matching the tid is both stricter about
+	// whose wait this is and indifferent to what the compiler did.
 	var networkStack []string
+	var reasons []offcpu.Reason
 	for _, b := range blocked {
+		if b.TID != pingTID {
+			continue
+		}
+		reasons = append(reasons, b.Reason)
 		if b.Reason != offcpu.ReasonNetwork {
 			continue
 		}
 		for _, frame := range b.Stack {
-			// Not just any network classification: this one has to be the
-			// ping that just ran, so the test cannot pass on some unrelated
-			// socket elsewhere on the machine having a specific enough name.
-			if frame == "ping_recvmsg" || frame == "inet_recvmsg" {
+			// sock_recvmsg is the exported entry to the socket receive path
+			// and cannot be inlined out of existence; the rest are accepted
+			// because any of them is already inside it.
+			switch frame {
+			case "sock_recvmsg", "inet_recvmsg", "ping_recvmsg", "raw_recvmsg",
+				"udp_recvmsg", "skb_recv_datagram", "__skb_wait_for_more_packets":
 				networkStack = b.Stack
 			}
 		}
 	}
 	if networkStack == nil {
-		t.Fatalf("no thread was reported blocked in a socket read, across %d "+
-			"blocked intervals, after running ping", len(blocked))
+		t.Fatalf("ping (tid %d) was not reported blocked in a socket read; across "+
+			"%d blocked intervals it was seen waiting for %v", pingTID, len(blocked), reasons)
 	}
 	t.Logf("stack: %v", networkStack)
 }

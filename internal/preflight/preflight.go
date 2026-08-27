@@ -43,6 +43,13 @@ type Check struct {
 	Detail string
 	// Consequence is what stops working when this requirement is missing.
 	Consequence string
+	// Optional marks a capability the tool runs without rather than a
+	// requirement it cannot start without. A failing optional check costs one
+	// column of the report and is not a reason to refuse the host -- but it
+	// is still printed, because a column that is absent and a column that
+	// measured zero are different claims and the report has to be able to
+	// tell them apart.
+	Optional bool
 }
 
 // Report is the result of every check, in a fixed order.
@@ -50,25 +57,45 @@ type Report struct {
 	Checks []Check
 }
 
-// OK reports whether every check passed.
+// OK reports whether every requirement passed. Optional capabilities are not
+// requirements and do not decide it.
 func (r Report) OK() bool {
-	for _, c := range r.Checks {
-		if !c.OK {
-			return false
-		}
-	}
-	return true
+	return len(r.Failed()) == 0
 }
 
-// Failed returns the checks that did not pass, in report order.
+// Failed returns the requirements that did not pass, in report order.
 func (r Report) Failed() []Check {
 	var failed []Check
 	for _, c := range r.Checks {
-		if !c.OK {
+		if !c.OK && !c.Optional {
 			failed = append(failed, c)
 		}
 	}
 	return failed
+}
+
+// Requirements counts the checks that decide whether the host is usable, which
+// is every check that is not an optional capability.
+func (r Report) Requirements() int {
+	n := 0
+	for _, c := range r.Checks {
+		if !c.Optional {
+			n++
+		}
+	}
+	return n
+}
+
+// Degraded returns the optional capabilities this host does not have, in
+// report order. The tool runs; something it would otherwise report does not.
+func (r Report) Degraded() []Check {
+	var degraded []Check
+	for _, c := range r.Checks {
+		if !c.OK && c.Optional {
+			degraded = append(degraded, c)
+		}
+	}
+	return degraded
 }
 
 // host locates the pseudo-filesystems the checks read. Tests point it at a
@@ -95,6 +122,7 @@ func Run() Report {
 		checkBTF(),
 		checkCgroupV2(h),
 		checkCPUController(h),
+		checkCFSBandwidth(h),
 		checkProgramLoad(),
 	}}
 }
@@ -232,6 +260,63 @@ func checkCPUController(h host) Check {
 	}
 	c.Detail = fmt.Sprintf("cpu absent from %s (found: %s)", path, strings.Join(available, " "))
 	return c
+}
+
+// checkCFSBandwidth reports whether this kernel can throttle a cgroup at all.
+//
+// Read from cpu.stat rather than from /proc/kallsyms or a kernel config,
+// because it is the interface the kernel actually exposes: a kernel built
+// with CONFIG_CFS_BANDWIDTH accounts nr_periods, nr_throttled and
+// throttled_usec in every cgroup's cpu.stat, and one built without it accounts
+// none of them anywhere. /proc/config.gz is absent on plenty of hosts, and a
+// missing symbol cannot tell a feature that was compiled out apart from one
+// the compiler inlined -- which is the distinction the whole decision rests
+// on.
+//
+// This is optional rather than required. Where the kernel cannot throttle,
+// throttled time is not unknown, it is necessarily zero, so running without
+// the throttling probes cannot misfile anything -- there is nothing to
+// misfile. That is the opposite of the case where the kernel does account
+// bandwidth and the probe still will not attach: there the time exists,
+// carrying on would file it as ordinary runqueue delay, and that is the one
+// confusion this tool was built to remove. offcpu.Open makes that distinction
+// with this same signal and refuses in the second case.
+func checkCFSBandwidth(h host) Check {
+	c := Check{
+		Name:     "cgroup cpu bandwidth",
+		Optional: true,
+		Consequence: "this kernel was built without CONFIG_CFS_BANDWIDTH, so no " +
+			"cgroup can be throttled and there is no throttle_cfs_rq to attach to; " +
+			"every other column is measured as usual and throttled is reported as " +
+			"unavailable rather than as a measured zero",
+	}
+
+	path := filepath.Join(h.cgroupRoot, "cpu.stat")
+	raw, err := os.ReadFile(path) //nolint:gosec // a fixed path under /sys
+	if err != nil {
+		c.Detail = fmt.Sprintf("read %s: %v", path, err)
+		return c
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "throttled_usec ") {
+			c.OK = true
+			c.Detail = fmt.Sprintf("%s accounts throttled_usec", path)
+			return c
+		}
+	}
+	c.Detail = fmt.Sprintf("%s accounts no throttled_usec, so the kernel has no "+
+		"CFS bandwidth control", path)
+	return c
+}
+
+// ThrottlingObservable reports whether this kernel accounts for CFS bandwidth,
+// and therefore whether attaching the throttling probes can succeed.
+//
+// Exported so that offcpu can ask the same question this report answers,
+// against the same file, rather than growing a second copy of the rule that
+// would eventually be a different rule.
+func ThrottlingObservable() bool {
+	return checkCFSBandwidth(hostPaths()).OK
 }
 
 func checkProgramLoad() Check {

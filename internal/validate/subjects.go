@@ -12,6 +12,7 @@ import (
 
 	"github.com/FranciscoPLoureiro/wallclock/internal/ksyms"
 	"github.com/FranciscoPLoureiro/wallclock/internal/offcpu"
+	"github.com/FranciscoPLoureiro/wallclock/internal/spin"
 )
 
 // subjectPrefix marks every thread and process this package creates, so a
@@ -214,9 +215,9 @@ func startSpinners(n int, suffix string) (*spinners, error) {
 	if err != nil {
 		return nil, fmt.Errorf("temporary directory for the spinner: %w", err)
 	}
-	shell, err := os.ReadFile("/bin/dash")
+	shell, _, err := spin.Shell()
 	if err != nil {
-		return nil, fmt.Errorf("reading /bin/dash to copy as the spinner: %w", err)
+		return nil, err
 	}
 	binary := filepath.Join(dir, subjectPrefix+suffix)
 	if err := os.WriteFile(binary, shell, 0o755); err != nil { //nolint:gosec // it has to be executable

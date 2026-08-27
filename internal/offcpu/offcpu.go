@@ -24,6 +24,8 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/FranciscoPLoureiro/wallclock/internal/pidns"
+	"github.com/FranciscoPLoureiro/wallclock/internal/preflight"
+	"github.com/FranciscoPLoureiro/wallclock/internal/tracefs"
 )
 
 //go:generate go tool bpf2go -target bpfel -type thread -type stat_slot -type blocked_key offcpu ../../bpf/offcpu.bpf.c -- -D__TARGET_ARCH_x86 -I/usr/include/x86_64-linux-gnu
@@ -177,7 +179,23 @@ func (d Drops) Any() bool {
 type Session struct {
 	objs  offcpuObjects
 	links []link.Link
+
+	// throttlingObservable records whether the throttling probes went on. A
+	// kernel with no CFS bandwidth control has nothing to attach them to, and
+	// the reports have to say that rather than print a zero that looks
+	// measured.
+	throttlingObservable bool
 }
+
+// ThrottlingObservable reports whether this session is watching cgroup
+// throttling.
+//
+// False means the kernel cannot throttle at all, so the throttled column is
+// unavailable rather than zero. Every other column is measured as usual. A
+// caller that prints a decomposition has to distinguish the two: "no time was
+// throttled" and "throttling could not have been seen" are different
+// statements about a host, and only one of them is evidence.
+func (s *Session) ThrottlingObservable() bool { return s.throttlingObservable }
 
 // Open loads the programs and attaches them to the scheduler tracepoints.
 //
@@ -202,6 +220,34 @@ func Open(targetPID int) (_ *Session, err error) {
 	}
 	if err := spec.Variables["filter_targets"].Set(filtering); err != nil {
 		return nil, fmt.Errorf("set filter_targets: %w", err)
+	}
+
+	// Where this kernel puts the fields these programs read, asked of the
+	// kernel rather than assumed from the one they were compiled against.
+	//
+	// Refused rather than defaulted. A program left with its compiled-in
+	// offsets on a kernel that moved them attaches without complaint and
+	// reports the bytes of a comm as a thread id, with a decomposition that
+	// closes to 100% and a report that says no threads were lost -- both true
+	// of whatever it observed, and neither of them about the machine.
+	if err = tracefs.Bind(spec.Variables, "sched", "sched_switch", []tracefs.Binding{
+		{Variable: "off_switch_prev_comm", Field: "prev_comm", Size: 16},
+		{Variable: "off_switch_prev_pid", Field: "prev_pid", Size: 4},
+		{Variable: "off_switch_prev_state", Field: "prev_state", Size: 8},
+		{Variable: "off_switch_next_comm", Field: "next_comm", Size: 16},
+		{Variable: "off_switch_next_pid", Field: "next_pid", Size: 4},
+	}); err != nil {
+		return nil, err
+	}
+	if err = tracefs.SameLayout("sched", "sched_wakeup", "sched_wakeup_new",
+		[]string{"comm", "pid"}); err != nil {
+		return nil, err
+	}
+	if err = tracefs.Bind(spec.Variables, "sched", "sched_wakeup", []tracefs.Binding{
+		{Variable: "off_wakeup_comm", Field: "comm", Size: 16},
+		{Variable: "off_wakeup_pid", Field: "pid", Size: 4},
+	}); err != nil {
+		return nil, err
 	}
 
 	s := &Session{}
@@ -268,19 +314,38 @@ func Open(targetPID int) (_ *Session, err error) {
 	// these are watching reads zero for a cgroup that is already throttled.
 	// The wait would then be filed as ordinary runqueue delay -- the exact
 	// confusion this phase exists to remove.
-	for _, probe := range []struct {
-		symbol  string
-		program *ebpf.Program
-	}{
-		{"throttle_cfs_rq", s.objs.OnThrottleCfsRq},
-		{"unthrottle_cfs_rq", s.objs.OnUnthrottleCfsRq},
-	} {
-		l, attachErr := link.Kprobe(probe.symbol, probe.program, nil)
-		if attachErr != nil {
-			err = fmt.Errorf("attach a kprobe to %s: %w", probe.symbol, attachErr)
-			return nil, err
+	//
+	// Both probes go on a static function of kernel/sched/fair.c, which CO-RE
+	// cannot help with: relocations move struct field offsets, and this is a
+	// symbol that either exists in the built kernel or does not. A kernel
+	// built without CONFIG_CFS_BANDWIDTH has no throttle_cfs_rq at all, and
+	// refusing to open there would cost on-CPU, runqueue, blocked and network
+	// -- the whole profile -- for a category that cannot occur on that host.
+	// So the probes are skipped and the column is marked unavailable, which
+	// is a different claim from zero and is reported as one.
+	//
+	// Where the kernel does account CFS bandwidth and the probe still will
+	// not attach, this refuses instead. There the throttled time is real, and
+	// carrying on would file it as ordinary runqueue delay -- the single
+	// confusion this tool exists to remove, reintroduced silently.
+	s.throttlingObservable = preflight.ThrottlingObservable()
+	if s.throttlingObservable {
+		for _, probe := range []struct {
+			symbol  string
+			program *ebpf.Program
+		}{
+			{"throttle_cfs_rq", s.objs.OnThrottleCfsRq},
+			{"unthrottle_cfs_rq", s.objs.OnUnthrottleCfsRq},
+		} {
+			l, attachErr := link.Kprobe(probe.symbol, probe.program, nil)
+			if attachErr != nil {
+				err = fmt.Errorf("attach a kprobe to %s: %w (this kernel accounts CFS "+
+					"bandwidth, so a cgroup here can be throttled and that time would "+
+					"be reported as runqueue delay instead)", probe.symbol, attachErr)
+				return nil, err
+			}
+			s.links = append(s.links, l)
 		}
-		s.links = append(s.links, l)
 	}
 
 	for _, attachment := range []struct {

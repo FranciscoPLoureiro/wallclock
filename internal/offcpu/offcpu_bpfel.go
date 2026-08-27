@@ -72,6 +72,13 @@ const (
 	offcpuProgOnThrottleCfsRq    = "on_throttle_cfs_rq"
 	offcpuProgOnUnthrottleCfsRq  = "on_unthrottle_cfs_rq"
 	offcpuVarFilterTargets       = "filter_targets"
+	offcpuVarOffSwitchNextComm   = "off_switch_next_comm"
+	offcpuVarOffSwitchNextPid    = "off_switch_next_pid"
+	offcpuVarOffSwitchPrevComm   = "off_switch_prev_comm"
+	offcpuVarOffSwitchPrevPid    = "off_switch_prev_pid"
+	offcpuVarOffSwitchPrevState  = "off_switch_prev_state"
+	offcpuVarOffWakeupComm       = "off_wakeup_comm"
+	offcpuVarOffWakeupPid        = "off_wakeup_pid"
 	offcpuVarUnusedBlockedKey    = "unused_blocked_key"
 	offcpuVarUnusedStatSlot      = "unused_stat_slot"
 	offcpuVarUnusedThread        = "unused_thread"
@@ -145,11 +152,18 @@ type offcpuMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type offcpuVariableSpecs struct {
-	FilterTargets    *ebpf.VariableSpec `ebpf:"filter_targets"`
-	UnusedBlockedKey *ebpf.VariableSpec `ebpf:"unused_blocked_key"`
-	UnusedStatSlot   *ebpf.VariableSpec `ebpf:"unused_stat_slot"`
-	UnusedThread     *ebpf.VariableSpec `ebpf:"unused_thread"`
-	UnusedThrottle   *ebpf.VariableSpec `ebpf:"unused_throttle"`
+	FilterTargets      *ebpf.VariableSpec `ebpf:"filter_targets"`
+	OffSwitchNextComm  *ebpf.VariableSpec `ebpf:"off_switch_next_comm"`
+	OffSwitchNextPid   *ebpf.VariableSpec `ebpf:"off_switch_next_pid"`
+	OffSwitchPrevComm  *ebpf.VariableSpec `ebpf:"off_switch_prev_comm"`
+	OffSwitchPrevPid   *ebpf.VariableSpec `ebpf:"off_switch_prev_pid"`
+	OffSwitchPrevState *ebpf.VariableSpec `ebpf:"off_switch_prev_state"`
+	OffWakeupComm      *ebpf.VariableSpec `ebpf:"off_wakeup_comm"`
+	OffWakeupPid       *ebpf.VariableSpec `ebpf:"off_wakeup_pid"`
+	UnusedBlockedKey   *ebpf.VariableSpec `ebpf:"unused_blocked_key"`
+	UnusedStatSlot     *ebpf.VariableSpec `ebpf:"unused_stat_slot"`
+	UnusedThread       *ebpf.VariableSpec `ebpf:"unused_thread"`
+	UnusedThrottle     *ebpf.VariableSpec `ebpf:"unused_throttle"`
 }
 
 // offcpuObjects contains all objects after they have been loaded into the kernel.
@@ -195,11 +209,18 @@ func (m *offcpuMaps) Close() error {
 //
 // It can be passed to loadOffcpuObjects or ebpf.CollectionSpec.LoadAndAssign.
 type offcpuVariables struct {
-	FilterTargets    *ebpf.Variable `ebpf:"filter_targets"`
-	UnusedBlockedKey *ebpf.Variable `ebpf:"unused_blocked_key"`
-	UnusedStatSlot   *ebpf.Variable `ebpf:"unused_stat_slot"`
-	UnusedThread     *ebpf.Variable `ebpf:"unused_thread"`
-	UnusedThrottle   *ebpf.Variable `ebpf:"unused_throttle"`
+	FilterTargets      *ebpf.Variable `ebpf:"filter_targets"`
+	OffSwitchNextComm  *ebpf.Variable `ebpf:"off_switch_next_comm"`
+	OffSwitchNextPid   *ebpf.Variable `ebpf:"off_switch_next_pid"`
+	OffSwitchPrevComm  *ebpf.Variable `ebpf:"off_switch_prev_comm"`
+	OffSwitchPrevPid   *ebpf.Variable `ebpf:"off_switch_prev_pid"`
+	OffSwitchPrevState *ebpf.Variable `ebpf:"off_switch_prev_state"`
+	OffWakeupComm      *ebpf.Variable `ebpf:"off_wakeup_comm"`
+	OffWakeupPid       *ebpf.Variable `ebpf:"off_wakeup_pid"`
+	UnusedBlockedKey   *ebpf.Variable `ebpf:"unused_blocked_key"`
+	UnusedStatSlot     *ebpf.Variable `ebpf:"unused_stat_slot"`
+	UnusedThread       *ebpf.Variable `ebpf:"unused_thread"`
+	UnusedThrottle     *ebpf.Variable `ebpf:"unused_throttle"`
 }
 
 // offcpuPrograms contains all programs after they have been loaded into the kernel.

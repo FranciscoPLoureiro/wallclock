@@ -29,8 +29,17 @@
  * What this is not: a general request-latency measure. It pairs a send with
  * the next receive on the same connection, which is what a request/response
  * protocol does. A connection streaming in one direction, or pipelining
- * several requests before reading any reply, is measured as something else,
- * and the report says so rather than pretending otherwise.
+ * several requests before reading any reply, is not measured.
+ *
+ * And the report does not say so, which is the part worth knowing. An
+ * unpairable connection is not listed as unmeasured -- it is absent, and an
+ * absence caused by not measuring reads exactly like an absence of traffic.
+ * Phase 6 profiled a service through eighteen runs in which every single
+ * request went through Redis, and Redis appeared in the destination table
+ * zero times while PostgreSQL and RabbitMQ appeared in all eighteen. A reader
+ * of that table would conclude the service had two dependencies. It had
+ * three. Fixing that means either pairing pipelined traffic or naming the
+ * connections that could not be paired; neither is done here yet.
  */
 #include <linux/bpf.h>
 #include <linux/errno.h>

@@ -67,7 +67,15 @@ require "$RUNQLAT"
 # comm comes from the executable name and the kernel does not read argv[0] for
 # it, so the subjects are copies of real binaries under the names the reports
 # will show. `exec -a` does not do this.
-cp /bin/dash "$WORKDIR/wc-capped"
+# Which shell that is varies by distribution -- Debian ships /bin/dash, Arch
+# and Fedora do not -- and /bin/sh is the one POSIX guarantees. Same list, and
+# the same reasoning, as internal/spin.
+SPIN_SHELL=""
+for candidate in /bin/dash /bin/sh /bin/bash /usr/bin/dash /usr/bin/sh /usr/bin/bash; do
+	[ -x "$candidate" ] && { SPIN_SHELL="$candidate"; break; }
+done
+[ -n "$SPIN_SHELL" ] || { echo "no shell to copy as the spinner" >&2; exit 1; }
+cp "$SPIN_SHELL" "$WORKDIR/wc-capped"
 cp /bin/sleep "$WORKDIR/wc-napper"
 
 # A cgroup allowed 20 ms of CPU in every 100 ms period.

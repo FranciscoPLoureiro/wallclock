@@ -235,3 +235,128 @@ jobs:
         # runner that refused to load anything would report a green tick for
         # a suite that did nothing.
         run: make smoke
+
+  matrix:
+    name: load and test across kernels
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # The README's strongest claim is that one compiled object loads on any
+    # kernel new enough, and until this job existed nothing checked it. The
+    # evidence was a table somebody produced by hand, once, on their own
+    # machine -- which is the shape of claim this project spends its comments
+    # warning about.
+    #
+    # This is also the job that could not be made to work for seven rounds.
+    # The cause was never vimto and never the binary: GitHub's runners carry
+    # /dev/kvm and do not make it readable by the runner user, so QEMU falls
+    # back to software emulation and a guest that would finish in under a
+    # second instead runs until the deadline kills it. A hang and a
+    # thirty-times-slower machine are indistinguishable from outside.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Give the runner access to KVM
+        # The device node exists without this and cannot be opened. The udev
+        # rule is the documented workaround and is what every project running
+        # emulators in Actions uses.
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: KVM has to actually work
+        # Asserted rather than hoped for, and this is the whole lesson of the
+        # first attempt. Without KVM nothing here fails: it gets slow, every
+        # guest times out, and the job reports a hang whose cause is nowhere
+        # in the log. A missing accelerator has to be a named failure on the
+        # step that owns it.
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends qemu-system-x86
+          test -r /dev/kvm && test -w /dev/kvm || {
+            echo "/dev/kvm is not usable by $(id -un); guests would be emulated" >&2
+            ls -l /dev/kvm >&2 || echo "and the device node is not there at all" >&2
+            exit 1
+          }
+          # `-accel help` lists what qemu was compiled with, not what it can
+          # use here, so it is asked to actually initialise the accelerator.
+          # Attempting the operation is the rule everywhere else in this
+          # repository and it belongs here most of all: the failure this guards
+          # against does not raise an error, it makes everything thirty times
+          # slower.
+          out=$(timeout 10 qemu-system-x86_64 -accel kvm -display none                   -nodefaults -m 64 -no-reboot 2>&1) || true
+          if printf '%s' "$out" | grep -qiE 'kvm.*(unavailable|not (supported|available)|fail|denied|no such)'; then
+            echo "qemu could not use kvm:" >&2; printf '%s\n' "$out" >&2; exit 1
+          fi
+          echo "kvm: $(ls -l /dev/kvm)"
+          echo "nested: $(grep -c -E '^flags.*(vmx|svm)' /proc/cpuinfo) cpus expose virtualisation"
+
+      - name: Install the BPF toolchain
+        # The guests run compiled test binaries, and two of those load fixture
+        # objects -- programs written to be refused, compiled next to the test
+        # that asserts the refusal. Those objects are generated rather than
+        # committed, so without clang here the suite fails identically on
+        # every kernel for a reason that has nothing to do with any of them,
+        # which is how it failed the first time this job got as far as running.
+        timeout-minutes: 5
+        run: |
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          sudo apt-get $apt_opts update
+          sudo apt-get $apt_opts install -y --no-install-recommends clang llvm libbpf-dev
+
+      - name: Install vimto
+        # Statically linked because vimto copies itself into the guest as its
+        # init, and the guest has no libc to link it against.
+        run: CGO_ENABLED=0 go install lmb.io/vimto@latest
+
+      - name: Load and test on every kernel
+        # A subset of what `make matrix` runs locally, chosen for span rather
+        # than for count: one below the 5.8 floor where the tool has to
+        # refuse, and four above it either side of the versions this is
+        # developed and released on. The full set, and the distribution cloud
+        # images that can exercise cgroup throttling, stay a local target --
+        # those images are hundreds of megabytes each.
+        env:
+          # One below the 5.8 floor where the tool has to refuse, and four
+          # above it. The deadline is per guest and generous: a working one
+          # finishes in seconds, so four minutes is there to catch a hang
+          # rather than to race a slow boot -- and short enough that a job
+          # where every guest fails still finishes inside its own budget and
+          # gets to say why. The first run of this did not, and was killed
+          # holding the only evidence it had produced.
+          KERNELS: "5.4 5.15 6.1 6.6 stable"
+          DEADLINE: "240"
+        run: make matrix | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: What the guests said
+        # Printed into the summary rather than only uploaded, because the
+        # question after a row says "no result" is what the guest managed
+        # before it stopped, and that should not need a download.
+        if: always()
+        run: |
+          for log in build/matrix/*.log; do
+            [ -e "$log" ] || continue
+            echo "<details><summary>$(basename "$log")</summary>"
+            echo
+            echo '```'
+            tail -c 4000 "$log"
+            echo '```'
+            echo '</details>'
+          done >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the logs
+        # `always()`, not `failure()`. A job killed by its own timeout is
+        # *cancelled*, and failure() is false for a cancellation -- so the
+        # first run of this job threw away the only evidence it produced.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-matrix-logs
+          path: build/matrix/
+          retention-days: 7
