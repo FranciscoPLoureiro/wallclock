@@ -9,10 +9,11 @@ below is the same text the program prints, and both come from
 ```
 $ sudo wallclock preflight
 requirement                status  found
-kernel >= 5.8              ok      6.6.87.2-microsoft-standard-WSL2 (parsed as 6.6)
-kernel BTF                 ok      parses, task_struct has 240 members
+kernel >= 5.8              ok      7.1.9-arch1-2 (parsed as 7.1)
+kernel BTF                 ok      parses, task_struct has 267 members
 cgroup v2                  ok      cgroup2fs at /sys/fs/cgroup
-cgroup cpu controller      ok      enabled at the root (cpuset cpu io memory hugetlb pids rdma)
+cgroup cpu controller      ok      enabled at the root (cpuset cpu io memory hugetlb pids rdma misc dmem)
+cgroup cpu bandwidth       ok      /sys/fs/cgroup/cpu.stat accounts throttled_usec
 load a tracepoint program  ok      two-instruction program accepted by the verifier
 
 all requirements met
@@ -30,6 +31,20 @@ start.
 | **cgroup v2** | `statfs` magic of `/sys/fs/cgroup` | cgroup filtering and the `cpu.stat` cross-check both address the unified hierarchy; per-PID time still works, per-container time does not |
 | cgroup **cpu controller** | `cpu` present in `/sys/fs/cgroup/cgroup.controllers` | no `cpu.max` and no `cpu.stat`, so throttling cannot be observed and cannot be told apart from ordinary runqueue delay |
 | **CAP_BPF** and **CAP_PERFMON** | loading a two-instruction tracepoint program | nothing loads at all |
+
+One further check is reported and is not a requirement:
+
+| Capability | Checked by | Absent means |
+|---|---|---|
+| cgroup **cpu bandwidth** | `throttled_usec` present in `/sys/fs/cgroup/cpu.stat` | the kernel was built without `CONFIG_CFS_BANDWIDTH`, so nothing can be throttled and `throttle_cfs_rq` does not exist to attach to. Every other column is measured as usual and `throttled` is reported as **unavailable** rather than as a measured zero |
+
+The distinction is the whole reason it is not a requirement. Where the kernel
+cannot throttle, throttled time is not unknown, it is necessarily zero, and
+running without those probes cannot misfile anything because there is nothing
+to misfile. Where the kernel *does* account bandwidth and the probe still will
+not attach, `offcpu.Open` refuses instead: there the time is real, and carrying
+on would file it as ordinary runqueue delay -- the one confusion this tool
+exists to remove.
 
 ### Why 5.8 and not lower
 
@@ -102,111 +117,180 @@ load a tracepoint program is not satisfied.
 
 ## Where this has been verified
 
-Both of these are checked by the same command, and the CI one runs on every
-pull request.
+Two matrices, both reproducible with one command, plus CI on every pull
+request. `make matrix` boots kernel images under QEMU; `make distro-matrix`
+boots the cloud images distributions publish. Neither needs root on the host:
+`/dev/kvm` is world-readable on an ordinary desktop and the root these tests
+need is root inside the guest.
 
-| Host | Kernel | BTF | cgroup | clang | Result |
-|---|---|---|---|---|---|
-| WSL2, Debian 13 (development) | `6.6.87.2-microsoft-standard-WSL2` | 6 050 732 bytes, `task_struct` 240 members | v2, `cpu` delegated | 19.1.7 | all requirements met |
-| GitHub Actions `ubuntu-latest` (CI) | `6.17.0-1022-azure` | 6 841 206 bytes, `task_struct` 266 members | v2, `cpu` delegated | 18.1.3 | all requirements met |
+**Five kernels run in CI on every pull request** -- 5.4, 5.15, 6.1, 6.6 and
+stable, spanning the floor -- so the claim is enforced rather than recorded.
+That job took seven attempts to get working and the cause was never the tool:
+GitHub's runners carry `/dev/kvm` and do not make it readable by the runner
+user, QEMU falls back to software emulation, and a guest thirty times slower
+is indistinguishable from a hung one. The job now installs a udev rule and
+then *asserts* the accelerator is usable, because a missing accelerator has to
+be a named failure rather than a timeout. The distribution images stay local:
+they are hundreds of megabytes each, and they are the ones that exercise
+throttling.
 
-The two kernels differ by eleven minor versions and report `task_struct` with
-a different number of members — which is the argument for CO-RE stated as a
-measurement rather than as a principle. See the README for that decision. The
-two clang versions differ as well, which is a second thing this pair happens
-to hold constant only because it is checked.
+### Kernels a distribution ships
 
-**The runner kernel moves without notice.** Two runs a few hours apart landed
-on `6.17.0-1022-azure` and `6.17.0-1020-azure`. Nothing broke, and that is the
-point of recording it in the job summary: the day something does break, the
-first question is what changed, and "the image" is only a satisfying answer
-when the previous value was written down.
+These are the interesting ones. They are what a reader would run this on, they
+are built with the configs distributions actually use, and they can therefore
+exercise cgroup throttling -- which the BPF CI images cannot.
+
+| Kernel | Distribution | `task_struct` | Result |
+|---|---|---|---|
+| `5.4.0-216-generic` | Ubuntu 20.04 | no BTF | refused, correctly: below the 5.8 floor |
+| `5.15.0-190-generic` | Ubuntu 22.04 | 243 members | every suite, nothing skipped |
+| `6.1.0-52-cloud-amd64` | Debian 12 | 244 members | every suite, nothing skipped |
+| `6.8.0-138-generic` | Ubuntu 24.04 | 273 members | every suite, nothing skipped |
+| `5.14.0-687.10.1.el9_8` | Rocky 9 | 262 members | every suite, nothing skipped |
+| `7.1.9-arch1-2` | Arch, bare metal | 267 members | every suite, nothing skipped |
+| `6.17.0-*-azure` | GitHub Actions, CI | 266 members | preflight and `make smoke`, per pull request |
+
+### Kernels from the BPF CI images
+
+`ghcr.io/cilium/ci-kernels`, which is how cilium/ebpf -- the library this is
+built on -- runs its own tests. They span further than any distribution does
+and they cost seconds each.
+
+| Kernel | `task_struct` | Result |
+|---|---|---|
+| `4.19.322` | no BTF | refused, correctly |
+| `5.4.296` | no BTF | refused, correctly |
+| `5.10.259` | 198 members | passes, throttling skipped |
+| `5.15.210` | 212 members | passes, throttling skipped |
+| `6.1.176` | 224 members | passes, throttling skipped |
+| `6.6.143` | 232 members | passes, throttling skipped |
+| `6.10.13` | 228 members | passes, throttling skipped |
+| `7.1.1` | 229 members | passes, throttling skipped |
+
+Every one of those images is built with `CONFIG_CFS_BANDWIDTH` unset, so no
+cgroup in them can be throttled and the throttling test is skipped rather than
+run. That is worth stating plainly: **the QEMU matrix alone could never have
+validated the claim this project is about**, whatever else had gone right with
+it. It proves loading, attachment, and the decomposition; the category that
+distinguishes this tool from `offcputime` needs the distribution images.
+
+### What the two together are evidence of
+
+Thirteen kernels, one compiled object, `task_struct` measured at eight
+different sizes between 198 and 273 members. The pairs are the argument:
+
+| Same upstream version, different build | `task_struct` |
+|---|---|
+| 5.15.210 (BPF CI) against `5.15.0-190` (Ubuntu 22.04) | 212 against 243 |
+| 6.1.176 (BPF CI) against `6.1.0-52` (Debian 12) | 224 against 244 |
+
+Thirty-one members apart on the same nominal kernel. That is CO-RE stated as a
+measurement rather than as a principle, and it is a different statement from
+two kernels eleven minor versions apart, both above 6.6, where nothing had
+moved.
+
+### The floor is measured now, not reasoned
+
+4.19, 5.4 under QEMU and Ubuntu 20.04's `5.4.0-216` all refuse, and the
+assertion is not that they failed. Nearly everything that goes wrong also
+fails. It is that the run reached its end -- the guest prints a sentinel after
+the work, and a row whose log lacks it is recorded as *no result* rather than
+as a refusal -- and that the kernel requirement is the one that refused.
+
+That check exists in that shape because of how the previous attempt failed. A
+refusal test passed on a hang: the deadline killed QEMU with status 124, the
+pattern matching the refusal accepted the bare word "kernel", and that word
+appears in the timeout message. Green, with the tool never having run.
+
+## What the matrix found
+
+Building it was worth more than the rows it produced.
+
+### Red Hat kernels were being reported wrongly, and silently
+
+On Rocky 9 the tool attached to every tracepoint without complaint and then
+reported thread ids of 6911073 and 7102830, with an empty command column, a
+decomposition closing to 100%, and `no threads lost`.
+
+Red Hat's 9.x kernel calls itself 5.14 and carries PREEMPT_LAZY, which is
+upstream in 6.13. The backport adds `common_preempt_lazy_count` to the common
+header every tracepoint record begins with, and everything after it moves --
+by four bytes for the four-byte fields, and by eight for `sched_switch`'s
+`prev_state`, which is eight bytes and has to be aligned:
+
+```
+                Arch 7.1.9    Rocky 9 (5.14.0-687)
+prev_comm            8             12
+prev_pid            24             28
+prev_state          32             40
+next_pid            56             64
+```
+
+The programs read those fields at offsets fixed when they were compiled, so
+`prev_pid` came from the last four bytes of `prev_comm`.
+
+This project had already met that hazard once, on `sched_process_fork`, and
+the comment recording it in `bpf/offcpu.bpf.c` states the rule correctly:
+tracepoint field *names* are stable ABI and their offsets are not. That case
+announced itself, because the offsets moved *past the end* of the record and
+the kernel refuses to attach a program that reads beyond a tracepoint's size.
+This one did not: the record grew, every read stayed inside it, and the
+program ran.
+
+**A read that goes out of bounds is caught by the kernel. A read that lands on
+the wrong field of the right record is caught by nothing** -- and the two
+integrity claims this tool makes about its own output, that the decomposition
+closes and that no threads were lost, were both perfectly true of the wrong
+threads.
+
+`internal/tracefs` now reads the layout from the kernel that is about to load
+the program and writes the real offsets into the programs before they load. A
+field that is missing, or that kept its name and changed width, is an error
+naming the field and both offsets rather than a default to fall back on --
+because falling back is precisely the behaviour that produced the wrong
+numbers. The matrix records each kernel's layout in its log, so a future
+divergence is visible rather than inferred.
+
+### The test suite only ran fully on Debian
+
+Three places copied `/bin/dash` to make a CPU-burning subject: the throttling
+test, `wallclock validate`, and `scripts/compare-tools.sh`. Debian and Ubuntu
+ship that file and Arch, Fedora and Red Hat do not. On any other distribution
+the throttling test -- the claim this project exists to make -- **skipped**,
+and the suite reported green. `internal/spin` resolves a shell from a
+candidate list ending at `/bin/sh`, which POSIX requires, and a host without
+one is now a failure rather than a skip.
+
+### A test was asserting on a symbol rather than on behaviour
+
+`TestABlockedSocketReadIsClassifiedAsNetwork` required a stack frame named
+`ping_recvmsg` or `inet_recvmsg`. `inet_recvmsg` is inlined away on 7.1, and
+which of the two appears at all depends on whether `ping` got a raw socket or
+an ICMP datagram socket, which depends on whether it was running as root. It
+failed on a kernel where the classification was entirely correct. It now
+matches the tid of the `ping` it started, which is both stricter about whose
+wait it is looking at and indifferent to what the compiler did.
 
 ## Known gaps
 
-- **Only x86-64 is exercised.** The BPF objects are compiled with
-  `-D__TARGET_ARCH_x86` and the include path is resolved from `uname -m`.
-  arm64 should follow from changing both, and has not been tried.
-- **Two kernels are exercised and neither of them was chosen.** They are
-  whatever the development machine and the hosted runner happen to be. Nothing
-  below 6.6 has ever run this code, so compatibility down to the stated 5.8
-  floor is reasoned from the feature-to-version map above rather than
-  measured. A QEMU matrix was built to close that gap and did not land; the
-  attempt is written up below, because "not done" and "not attempted" are
-  different claims.
-- **cgroup v1 is not supported and is not detected gracefully beyond the
-  check.** The tool refuses to start rather than silently reporting numbers
-  that mean something different.
-
-## The QEMU matrix that did not land
-
-The plan was the one the upstream BPF projects use: boot pre-built kernel
-images under QEMU and run the kernel-dependent tests inside. `vimto` and
-`ghcr.io/cilium/ci-kernels`, which is how cilium/ebpf — the library this is
-built on — runs its own CI. Six kernels: 5.10, 5.15, 6.1, 6.6, stable, and 5.4
-below the stated floor, where the assertion inverts and the tool has to refuse.
-
-Seven CI rounds later it does not work, and this is what was established.
-
-**What works.** The VM boots and runs its init: one round got as far as
-executing a setup command and failing inside it, in ninety seconds. So the
-image pulls, QEMU starts, and the guest reaches userspace.
-
-**What does not.** Running the tool inside it never returns. Not an error — a
-wait, ended only by the deadline. That is true with the binary built static,
-with no guest setup at all, and for both `preflight` and `go test`.
-
-**Four things about the guest that are not in vimto's README**, each of which
-cost a round:
-
-- `-kernel :6.6` alone is not a kernel reference; the tag substitutes into a
-  url that has to be configured, and without one it fails with `no tag in
-  image (missing colon)` — an error about the argument that was correct.
-- vimto dispatches on its first argument. Anything that is not `exec`,
-  `flush-cache` or a `go` invocation is `unknown command "./bin/wallclock"`,
-  which reads as the binary being missing.
-- `exec` requires vimto itself to be statically linked, because it copies
-  itself into the guest as init.
-- **The guest takes `/usr` and `/lib` from the kernel image**, and only `/`
-  from the host, read-only. A ci-kernels image carries a kernel and its
-  modules, not a userland, so there is no `mount`, no `dmesg`, and no shell to
-  run them under. Every setup line copied from a working configuration fails
-  with `executable file not found in $PATH`.
-
-And a fifth about this project rather than about vimto: an ordinary `go build`
-here links against the host libc — `ldd bin/wallclock` lists `libc.so.6` — and
-the guest has no libc to link against. The binary does not fail, it never
-starts. `CGO_ENABLED=0` fixes that and did not fix the hang.
-
-**What is not established** is why it still hangs. Candidates not ruled out:
-the runner's KVM support being unusable in a way that makes the guest too slow
-rather than broken; vimto's result channel, which failed once with `decode
-execution result: EOF`; something about how the binary is shared into the
-guest. Naming them is not the same as knowing.
-
-**Two things the attempt found that had nothing to do with kernels**, which is
-why it is documented rather than deleted:
-
-- A step in this repository's CI **could not fail**, and had not been able to
-  since the first day. `wallclock preflight | tee -a "$GITHUB_STEP_SUMMARY"`
-  exits with the status of `tee`, and the comment above it claimed it failed
-  on a host that could not run the project. Found because the matrix failed
-  three commands in one job and two of the three steps went green.
-- The refusal test **passed on a hang**. The deadline killed QEMU with status
-  124, the pattern matching the refusal message accepted the bare word
-  "kernel", and that word appears in the timeout message. Green, with the tool
-  never having run.
-
-Both are the same defect in different clothes, and it is this project's
-recurring one: the dangerous check is not the one that fails, it is the one
-that cannot. A test of a *refusal* is especially exposed, because nearly
-everything that can go wrong also exits non-zero — so "it failed" is not
-evidence that it failed for the stated reason.
-
-**Where this leaves the criterion.** The brief for this project offers the
-alternative explicitly: build the QEMU matrix, or lower the bar to a second
-kernel tested by hand and documented. This is the second, and the table above
-is what it amounts to — two kernels eleven minor versions apart, differing in
-`task_struct` size, both exercised on every pull request, with the CO-RE
-argument stated as a measurement. What is missing, and worth being plain
-about, is anything below 6.6.
+- **arm64 does not build, and here is where it stops.** Compiling the
+  programs with `-D__TARGET_ARCH_arm64` gets two of the four through: the
+  tracepoint-only ones, `minimal` and `syscount`. The two that use kprobes,
+  `offcpu` and `netlat`, fail at `BPF_KPROBE` with *incomplete definition of
+  type 'const struct user_pt_regs'* -- libbpf's `bpf_tracing.h` needs arm64's
+  own `pt_regs` layout, which is not on an x86-64 host and does not come from
+  the target flag. It wants arm64 kernel headers or a `vmlinux.h` generated
+  from an arm64 BTF. That is a build problem rather than a design one, and
+  compiling is anyway a long way short of loading: nothing here says the
+  verifier on an arm64 kernel would accept the result.
+- **The build has a Debian assumption in it.** `-I/usr/include/$(uname
+  -m)-linux-gnu` is a multiarch path that exists on Debian and Ubuntu and
+  nowhere else. It is harmless elsewhere -- clang ignores an include directory
+  that is not there, and other distributions put `asm/types.h` where it is
+  already looked for -- but the comment above it describes it as necessary,
+  and it is necessary on one family.
+- **cgroup v1 is not supported**, and the tool refuses to start rather than
+  reporting numbers that mean something different.
+- **No kernel between 4.19 and 5.4 has been tried**, and the floor is 5.8. The
+  two below it refuse for two independent reasons, version and missing BTF, so
+  nothing here separates those two causes.
