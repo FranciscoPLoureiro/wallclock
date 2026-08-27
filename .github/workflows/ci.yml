@@ -235,3 +235,82 @@ jobs:
         # runner that refused to load anything would report a green tick for
         # a suite that did nothing.
         run: make smoke
+
+  matrix:
+    name: load and test across kernels
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # The README's strongest claim is that one compiled object loads on any
+    # kernel new enough, and until this job existed nothing checked it. The
+    # evidence was a table somebody produced by hand, once, on their own
+    # machine -- which is the shape of claim this project spends its comments
+    # warning about.
+    #
+    # This is also the job that could not be made to work for seven rounds.
+    # The cause was never vimto and never the binary: GitHub's runners carry
+    # /dev/kvm and do not make it readable by the runner user, so QEMU falls
+    # back to software emulation and a guest that would finish in under a
+    # second instead runs until the deadline kills it. A hang and a
+    # thirty-times-slower machine are indistinguishable from outside.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Give the runner access to KVM
+        # The device node exists without this and cannot be opened. The udev
+        # rule is the documented workaround and is what every project running
+        # emulators in Actions uses.
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: KVM has to actually work
+        # Asserted rather than hoped for, and this is the whole lesson of the
+        # first attempt. Without KVM nothing here fails: it gets slow, every
+        # guest times out, and the job reports a hang whose cause is nowhere
+        # in the log. A missing accelerator has to be a named failure on the
+        # step that owns it.
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends qemu-system-x86
+          test -r /dev/kvm && test -w /dev/kvm || {
+            echo "/dev/kvm is not usable by $(id -un); guests would be emulated" >&2
+            ls -l /dev/kvm >&2 || echo "and the device node is not there at all" >&2
+            exit 1
+          }
+          qemu-system-x86_64 -accel help | grep -qw kvm || {
+            echo "this qemu has no kvm accelerator compiled in" >&2; exit 1; }
+          echo "kvm: $(ls -l /dev/kvm)"
+
+      - name: Install vimto
+        # Statically linked because vimto copies itself into the guest as its
+        # init, and the guest has no libc to link it against.
+        run: CGO_ENABLED=0 go install lmb.io/vimto@latest
+
+      - name: Load and test on every kernel
+        # A subset of what `make matrix` runs locally, chosen for span rather
+        # than for count: one below the 5.8 floor where the tool has to
+        # refuse, and four above it either side of the versions this is
+        # developed and released on. The full set, and the distribution cloud
+        # images that can exercise cgroup throttling, stay a local target --
+        # those images are hundreds of megabytes each.
+        env:
+          KERNELS: "5.4 5.15 6.1 6.6 stable"
+        run: bash scripts/kernel-matrix.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the logs
+        # Uploaded on failure only, and they are the whole diagnosis: each
+        # guest's log carries the kernel it booted, the tracepoint layout it
+        # reported, and the preflight table.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-matrix-logs
+          path: build/matrix/
+          retention-days: 7
