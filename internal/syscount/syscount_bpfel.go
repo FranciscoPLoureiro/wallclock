@@ -45,6 +45,7 @@ const (
 	syscountMapStats           = "stats"
 	syscountProgCountSyscalls  = "count_syscalls"
 	syscountProgStreamSyscalls = "stream_syscalls"
+	syscountVarOffSysEnterId   = "off_sys_enter_id"
 	syscountVarTargetCgroup    = "target_cgroup"
 	syscountVarTargetSyscall   = "target_syscall"
 	syscountVarTargetTgid      = "target_tgid"
@@ -111,6 +112,7 @@ type syscountMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type syscountVariableSpecs struct {
+	OffSysEnterId  *ebpf.VariableSpec `ebpf:"off_sys_enter_id"`
 	TargetCgroup   *ebpf.VariableSpec `ebpf:"target_cgroup"`
 	TargetSyscall  *ebpf.VariableSpec `ebpf:"target_syscall"`
 	TargetTgid     *ebpf.VariableSpec `ebpf:"target_tgid"`
@@ -155,6 +157,7 @@ func (m *syscountMaps) Close() error {
 //
 // It can be passed to loadSyscountObjects or ebpf.CollectionSpec.LoadAndAssign.
 type syscountVariables struct {
+	OffSysEnterId  *ebpf.Variable `ebpf:"off_sys_enter_id"`
 	TargetCgroup   *ebpf.Variable `ebpf:"target_cgroup"`
 	TargetSyscall  *ebpf.Variable `ebpf:"target_syscall"`
 	TargetTgid     *ebpf.Variable `ebpf:"target_tgid"`

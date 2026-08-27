@@ -120,6 +120,65 @@ struct sched_wakeup_ctx {
 };
 
 /*
+ * Where those fields actually sit, in the kernel that is about to load this.
+ *
+ * The structs above describe the layout this file was compiled against and
+ * are still the documentation of it, but nothing reads them any more: the
+ * initialisers below are their offsets, and the loader overwrites each one
+ * with what the kernel's own format file reports before the program loads.
+ *
+ * They are not a constant apart. Red Hat's 9.x kernel carries PREEMPT_LAZY --
+ * upstream in 6.13, backported into a kernel still numbered 5.14 -- which
+ * inserts common_preempt_lazy_count into the common header every tracepoint
+ * begins with. On sched_switch that moves prev_pid from 24 to 28 and
+ * prev_state from 32 to 40, because prev_state is eight bytes and has to be
+ * aligned. A single shift would have fixed one and broken the other.
+ *
+ * This is the same lesson as the one the fork and exit programs below were
+ * rewritten for, and it arrives more quietly. There the offsets moved past
+ * the end of the record, the kernel refused to attach and said EACCES. Here
+ * the record grew, every read stayed inside it, and the program ran and
+ * reported the bytes of a comm as a thread id -- with the decomposition
+ * closing to 100% and the report saying no threads were lost, because both of
+ * those are true of whatever it did observe.
+ */
+const volatile __u32 off_switch_prev_comm  = __builtin_offsetof(struct sched_switch_ctx, prev_comm);
+const volatile __u32 off_switch_prev_pid   = __builtin_offsetof(struct sched_switch_ctx, prev_pid);
+const volatile __u32 off_switch_prev_state = __builtin_offsetof(struct sched_switch_ctx, prev_state);
+const volatile __u32 off_switch_next_comm  = __builtin_offsetof(struct sched_switch_ctx, next_comm);
+const volatile __u32 off_switch_next_pid   = __builtin_offsetof(struct sched_switch_ctx, next_pid);
+const volatile __u32 off_wakeup_comm       = __builtin_offsetof(struct sched_wakeup_ctx, comm);
+const volatile __u32 off_wakeup_pid        = __builtin_offsetof(struct sched_wakeup_ctx, pid);
+
+/*
+ * Read through a helper rather than by dereferencing the context.
+ *
+ * The verifier permits reads of a tracepoint context at constant offsets and
+ * refuses a pointer formed by adding a value to it -- "dereference of
+ * modified ctx ptr disallowed" -- so an offset that is only known at load
+ * time cannot be a struct field access at all. bpf_probe_read_kernel takes
+ * the address as an ordinary kernel pointer, which is what it is.
+ */
+static __always_inline __s32 ctx_s32(const void *ctx, __u32 off)
+{
+	__s32 v = 0;
+	bpf_probe_read_kernel(&v, sizeof(v), (const char *)ctx + off);
+	return v;
+}
+
+static __always_inline __s64 ctx_s64(const void *ctx, __u32 off)
+{
+	__s64 v = 0;
+	bpf_probe_read_kernel(&v, sizeof(v), (const char *)ctx + off);
+	return v;
+}
+
+static __always_inline void ctx_comm(const void *ctx, __u32 off, char *dst)
+{
+	bpf_probe_read_kernel(dst, 16, (const char *)ctx + off);
+}
+
+/*
  * sched_process_fork and sched_process_exit have no context struct here on
  * purpose, and the reason is the most useful thing this file has to teach.
  *
@@ -697,20 +756,16 @@ static __always_inline void transition(__u32 tid, __u32 tgid, const char *comm,
 }
 
 SEC("tracepoint/sched/sched_switch")
-int on_sched_switch(struct sched_switch_ctx *ctx)
+int on_sched_switch(void *ctx)
 {
 	__u64 now = bpf_ktime_get_ns();
-	__u32 prev = (__u32)ctx->prev_pid;
-	__u32 next = (__u32)ctx->next_pid;
+	__u32 prev = (__u32)ctx_s32(ctx, off_switch_prev_pid);
+	__u32 next = (__u32)ctx_s32(ctx, off_switch_next_pid);
 	/*
-	 * Via the stack, not straight from the context.
-	 *
-	 * Copying ctx->prev_comm into a map value directly is rejected with
-	 * "dereference of modified ctx ptr R1 off=8 disallowed": the verifier
-	 * permits reads of the context at constant offsets, and refuses a
-	 * pointer formed by adding to it and then dereferenced. Landing the
-	 * array on the stack first turns the copy into loads the verifier can
-	 * account for, and costs 16 bytes of the 512 available.
+	 * Via the stack, not straight into a map value. Copying the comm out of
+	 * the context directly is rejected with "dereference of modified ctx ptr
+	 * R1 off=8 disallowed", and landing it on the stack first costs 16 bytes
+	 * of the 512 available.
 	 */
 	char comm[16];
 	__s32 stack_id = -1;
@@ -722,9 +777,10 @@ int on_sched_switch(struct sched_switch_ctx *ctx)
 		 * delay starts here rather than at a wakeup that will never
 		 * come.
 		 */
-		int runnable = ctx->prev_state == TASK_RUNNING ||
-			       (ctx->prev_state & TASK_REPORT_MAX);
-		__builtin_memcpy(comm, ctx->prev_comm, sizeof(comm));
+		__s64 prev_state = ctx_s64(ctx, off_switch_prev_state);
+		int runnable = prev_state == TASK_RUNNING ||
+			       (prev_state & TASK_REPORT_MAX);
+		ctx_comm(ctx, off_switch_prev_comm, comm);
 
 		/*
 		 * The stack is taken here and nowhere else, because here is the
@@ -756,7 +812,7 @@ int on_sched_switch(struct sched_switch_ctx *ctx)
 	}
 
 	if (tracked(next)) {
-		__builtin_memcpy(comm, ctx->next_comm, sizeof(comm));
+		ctx_comm(ctx, off_switch_next_comm, comm);
 		transition(next, 0, comm, STATE_ON_CPU, now, ARRIVAL_LIVE, 0, -1);
 	}
 
@@ -769,13 +825,13 @@ int on_sched_switch(struct sched_switch_ctx *ctx)
  * it does is precisely what this project exists to measure.
  */
 SEC("tracepoint/sched/sched_wakeup")
-int on_sched_wakeup(struct sched_wakeup_ctx *ctx)
+int on_sched_wakeup(void *ctx)
 {
-	__u32 tid = (__u32)ctx->pid;
+	__u32 tid = (__u32)ctx_s32(ctx, off_wakeup_pid);
 	if (!tracked(tid))
 		return 0;
 	char comm[16];
-	__builtin_memcpy(comm, ctx->comm, sizeof(comm));
+	ctx_comm(ctx, off_wakeup_comm, comm);
 	/* No process id: at a wakeup the running task is whoever did the
 	 * waking, so bpf_get_current_pid_tgid would file this thread under
 	 * someone else's process. */
@@ -784,13 +840,13 @@ int on_sched_wakeup(struct sched_wakeup_ctx *ctx)
 }
 
 SEC("tracepoint/sched/sched_wakeup_new")
-int on_sched_wakeup_new(struct sched_wakeup_ctx *ctx)
+int on_sched_wakeup_new(void *ctx)
 {
-	__u32 tid = (__u32)ctx->pid;
+	__u32 tid = (__u32)ctx_s32(ctx, off_wakeup_pid);
 	if (!tracked(tid))
 		return 0;
 	char comm[16];
-	__builtin_memcpy(comm, ctx->comm, sizeof(comm));
+	ctx_comm(ctx, off_wakeup_comm, comm);
 	transition(tid, 0, comm, STATE_RUNQUEUE, bpf_ktime_get_ns(), ARRIVAL_NEW, 0, -1);
 	return 0;
 }

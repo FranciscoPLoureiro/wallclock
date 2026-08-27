@@ -25,6 +25,7 @@ import (
 
 	"github.com/FranciscoPLoureiro/wallclock/internal/pidns"
 	"github.com/FranciscoPLoureiro/wallclock/internal/preflight"
+	"github.com/FranciscoPLoureiro/wallclock/internal/tracefs"
 )
 
 //go:generate go tool bpf2go -target bpfel -type thread -type stat_slot -type blocked_key offcpu ../../bpf/offcpu.bpf.c -- -D__TARGET_ARCH_x86 -I/usr/include/x86_64-linux-gnu
@@ -219,6 +220,34 @@ func Open(targetPID int) (_ *Session, err error) {
 	}
 	if err := spec.Variables["filter_targets"].Set(filtering); err != nil {
 		return nil, fmt.Errorf("set filter_targets: %w", err)
+	}
+
+	// Where this kernel puts the fields these programs read, asked of the
+	// kernel rather than assumed from the one they were compiled against.
+	//
+	// Refused rather than defaulted. A program left with its compiled-in
+	// offsets on a kernel that moved them attaches without complaint and
+	// reports the bytes of a comm as a thread id, with a decomposition that
+	// closes to 100% and a report that says no threads were lost -- both true
+	// of whatever it observed, and neither of them about the machine.
+	if err = tracefs.Bind(spec.Variables, "sched", "sched_switch", []tracefs.Binding{
+		{Variable: "off_switch_prev_comm", Field: "prev_comm", Size: 16},
+		{Variable: "off_switch_prev_pid", Field: "prev_pid", Size: 4},
+		{Variable: "off_switch_prev_state", Field: "prev_state", Size: 8},
+		{Variable: "off_switch_next_comm", Field: "next_comm", Size: 16},
+		{Variable: "off_switch_next_pid", Field: "next_pid", Size: 4},
+	}); err != nil {
+		return nil, err
+	}
+	if err = tracefs.SameLayout("sched", "sched_wakeup", "sched_wakeup_new",
+		[]string{"comm", "pid"}); err != nil {
+		return nil, err
+	}
+	if err = tracefs.Bind(spec.Variables, "sched", "sched_wakeup", []tracefs.Binding{
+		{Variable: "off_wakeup_comm", Field: "comm", Size: 16},
+		{Variable: "off_wakeup_pid", Field: "pid", Size: 4},
+	}); err != nil {
+		return nil, err
 	}
 
 	s := &Session{}

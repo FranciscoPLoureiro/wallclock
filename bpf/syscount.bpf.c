@@ -20,15 +20,21 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 /*
  * The context passed to raw_syscalls:sys_enter.
  *
- * Declared here rather than pulled from vmlinux.h because a tracepoint's
- * layout is stable ABI: it is generated from TRACE_EVENT macros, userspace
- * reads it out of /sys/kernel/tracing/events/.../format, and the kernel does
- * not reorder it between versions. Ordinary kernel structs are the opposite
- * -- task_struct moves under every config change -- which is what CO-RE is
- * for, and phase 2 is where that starts to matter.
+ * Declared here rather than pulled from vmlinux.h because a tracepoint's field
+ * *names* are stable ABI: they are generated from TRACE_EVENT macros and the
+ * kernel neither renames nor reorders them.
  *
- * The first member stands in for struct trace_entry, which is eight bytes of
- * type, flags, preempt count and pid that nothing here needs.
+ * Their offsets are not stable, and this struct is no longer read. It records
+ * the layout this file was compiled against, and the offset below -- which the
+ * loader overwrites with what the running kernel's own format file says -- is
+ * how the field is actually found. Red Hat's 9.x kernel adds
+ * common_preempt_lazy_count to the common header, which moves id from 8 to 16;
+ * a program reading offset 8 there gets a preempt count and a hole, matches no
+ * syscall filter, and reports nothing while attaching perfectly.
+ *
+ * The first member stands in for struct trace_entry, which on the kernel this
+ * was compiled against is eight bytes of type, flags, preempt count and pid
+ * that nothing here needs -- and elsewhere is twelve.
  */
 struct sys_enter_ctx {
 	__u64 __common;
@@ -51,6 +57,21 @@ struct sys_enter_ctx {
  * userspace can throw most away would cost more than the thing being
  * measured.
  */
+/*
+ * Where the syscall number sits, in the kernel about to load this. Read
+ * through a helper rather than as a struct field because the verifier refuses
+ * a context pointer with a value added to it, and this offset is only known at
+ * load time. See the same reasoning, at more length, in bpf/offcpu.bpf.c.
+ */
+const volatile __u32 off_sys_enter_id = __builtin_offsetof(struct sys_enter_ctx, syscall_nr);
+
+static __always_inline __s64 ctx_s64(const void *ctx, __u32 off)
+{
+	__s64 v = 0;
+	bpf_probe_read_kernel(&v, sizeof(v), (const char *)ctx + off);
+	return v;
+}
+
 const volatile __u32 target_tgid = 0;    /* 0: every process */
 const volatile __u64 target_cgroup = 0;  /* 0: every cgroup */
 const volatile long target_syscall = -1; /* -1: every syscall */
@@ -165,12 +186,12 @@ static __always_inline int selected(__u32 tgid, long syscall_nr)
 }
 
 SEC("tracepoint/raw_syscalls/sys_enter")
-int count_syscalls(struct sys_enter_ctx *ctx)
+int count_syscalls(void *ctx)
 {
 	__u64 id = bpf_get_current_pid_tgid();
 	__u32 tgid = id >> 32;
 
-	if (!selected(tgid, ctx->syscall_nr))
+	if (!selected(tgid, ctx_s64(ctx, off_sys_enter_id)))
 		return 0;
 
 	struct count *count = bpf_map_lookup_elem(&counts, &tgid);
@@ -206,12 +227,12 @@ int count_syscalls(struct sys_enter_ctx *ctx)
 }
 
 SEC("tracepoint/raw_syscalls/sys_enter")
-int stream_syscalls(struct sys_enter_ctx *ctx)
+int stream_syscalls(void *ctx)
 {
 	__u64 id = bpf_get_current_pid_tgid();
 	__u32 tgid = id >> 32;
 
-	if (!selected(tgid, ctx->syscall_nr))
+	if (!selected(tgid, ctx_s64(ctx, off_sys_enter_id)))
 		return 0;
 
 	/*
@@ -229,7 +250,7 @@ int stream_syscalls(struct sys_enter_ctx *ctx)
 	e->timestamp_ns = bpf_ktime_get_ns();
 	e->tgid = tgid;
 	e->pid = (__u32)id;
-	e->syscall_nr = ctx->syscall_nr;
+	e->syscall_nr = ctx_s64(ctx, off_sys_enter_id);
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
 	bpf_ringbuf_submit(e, 0);

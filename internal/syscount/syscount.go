@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FranciscoPLoureiro/wallclock/internal/tracefs"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
@@ -139,6 +140,18 @@ func Open(mode Mode, filter Filter) (_ *Session, err error) {
 		if err := spec.Variables[name].Set(value); err != nil {
 			return nil, fmt.Errorf("set %s: %w", name, err)
 		}
+	}
+
+	// Asked of this kernel rather than assumed from the one the object was
+	// compiled against. Where the common header of a tracepoint record has
+	// grown -- which is what Red Hat's PREEMPT_LAZY backport does to a kernel
+	// still numbered 5.14 -- id sits four bytes further along, and a program
+	// reading the old offset matches no syscall filter at all while attaching
+	// and running perfectly.
+	if err := tracefs.Bind(spec.Variables, "raw_syscalls", "sys_enter", []tracefs.Binding{
+		{Variable: "off_sys_enter_id", Field: "id", Size: 8},
+	}); err != nil {
+		return nil, err
 	}
 
 	s := &Session{}
