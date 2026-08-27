@@ -59,10 +59,23 @@ for kernel in $KERNELS; do
 	log="$LOGDIR/$kernel.log"
 	printf '%-8s ' "$kernel"
 
+	# The guest writes its own log rather than talking over vimto's stdout,
+	# which blocks on the first byte on some hosts -- see the comment at the
+	# top of scripts/matrix-guest.sh. vimto's own output still comes back on
+	# stdout, because that is where its errors are: an image that will not
+	# pull, a kernel reference it cannot parse.
+	guestlog="$LOGDIR/$kernel.guest.log"
+	rm -f "$guestlog"
 	timeout "$DEADLINE" "$VIMTO" -sudo -smp 4 -memory 2G \
 		-kernel "$IMAGE:$kernel" \
-		exec /bin/sh "$ROOT/scripts/matrix-guest.sh" >"$log" 2>&1
+		exec /bin/sh "$ROOT/scripts/matrix-guest.sh" "$ROOT/$guestlog" >"$log" 2>&1
 	vimto_status=$?
+
+	# One file to read afterwards: whatever vimto said, then whatever the
+	# guest said. A guest that never started leaves only the first, which is
+	# the case the sentinel below is there to catch.
+	cat "$guestlog" >>"$log" 2>/dev/null || true
+	rm -f "$guestlog"
 
 	# Turned into newlines, not deleted. vimto draws a download progress
 	# spinner that overwrites itself with \r, so deleting them splices every

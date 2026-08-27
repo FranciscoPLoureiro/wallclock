@@ -310,12 +310,14 @@ jobs:
         # images that can exercise cgroup throttling, stay a local target --
         # those images are hundreds of megabytes each.
         env:
-          # Three rather than five, and a four minute deadline per guest rather
-          # than ten. The first run of this job spent its whole twenty-five
-          # minutes on two kernels that never finished and was then killed
-          # holding the logs that would have said why. A CI job has to fail
-          # inside its own budget or it cannot report anything.
-          KERNELS: "5.4 6.1 stable"
+          # One below the 5.8 floor where the tool has to refuse, and four
+          # above it. The deadline is per guest and generous: a working one
+          # finishes in seconds, so four minutes is there to catch a hang
+          # rather than to race a slow boot -- and short enough that a job
+          # where every guest fails still finishes inside its own budget and
+          # gets to say why. The first run of this did not, and was killed
+          # holding the only evidence it had produced.
+          KERNELS: "5.4 5.15 6.1 6.6 stable"
           DEADLINE: "240"
         run: bash scripts/kernel-matrix.sh | tee -a "$GITHUB_STEP_SUMMARY"
 

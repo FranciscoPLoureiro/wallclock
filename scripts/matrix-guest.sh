@@ -11,6 +11,29 @@
 # sentinel printed after the work cannot be produced by a hang.
 set -u
 
+# Everything this script produces goes to the file named by $1, if there is
+# one, and never to stdout.
+#
+# Not tidiness -- the channel is broken on some hosts. A vimto guest reaches
+# its command and returns its exit status correctly, and then blocks forever on
+# the first byte the command writes to stdout or stderr. Measured on a GitHub
+# Actions runner, where `exec /bin/true` returns in under two seconds,
+# `exec /bin/false` returns 1 in under two seconds, and `exec /bin/echo hello`
+# never returns at all. The kernel's own console is a different channel and is
+# fine, which is why the guest boots and says so while the command inside it
+# cannot say anything.
+#
+# This is almost certainly what defeated the first attempt at this matrix,
+# where the tool "never returned" under both `preflight` and `go test` -- both
+# of which write on their first line -- and the search went to KVM, to static
+# linking and to CGO_ENABLED, none of which were it.
+#
+# The repository is mounted read-write into the guest at the same path it has
+# on the host, so a file written here is a file the host can read afterwards.
+if [ $# -ge 1 ] && [ -n "${1:-}" ]; then
+	exec >"$1" 2>&1
+fi
+
 echo "MATRIX_UNAME=$(uname -r)"
 
 # ci-kernels images boot with /sys/fs/cgroup as an empty sysfs directory --
