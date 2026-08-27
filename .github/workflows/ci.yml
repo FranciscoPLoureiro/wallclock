@@ -284,9 +284,18 @@ jobs:
             ls -l /dev/kvm >&2 || echo "and the device node is not there at all" >&2
             exit 1
           }
-          qemu-system-x86_64 -accel help | grep -qw kvm || {
-            echo "this qemu has no kvm accelerator compiled in" >&2; exit 1; }
+          # `-accel help` lists what qemu was compiled with, not what it can
+          # use here, so it is asked to actually initialise the accelerator.
+          # Attempting the operation is the rule everywhere else in this
+          # repository and it belongs here most of all: the failure this guards
+          # against does not raise an error, it makes everything thirty times
+          # slower.
+          out=$(timeout 10 qemu-system-x86_64 -accel kvm -display none                   -nodefaults -m 64 -no-reboot 2>&1) || true
+          if printf '%s' "$out" | grep -qiE 'kvm.*(unavailable|not (supported|available)|fail|denied|no such)'; then
+            echo "qemu could not use kvm:" >&2; printf '%s\n' "$out" >&2; exit 1
+          fi
           echo "kvm: $(ls -l /dev/kvm)"
+          echo "nested: $(grep -c -E '^flags.*(vmx|svm)' /proc/cpuinfo) cpus expose virtualisation"
 
       - name: Install vimto
         # Statically linked because vimto copies itself into the guest as its
@@ -301,14 +310,36 @@ jobs:
         # images that can exercise cgroup throttling, stay a local target --
         # those images are hundreds of megabytes each.
         env:
-          KERNELS: "5.4 5.15 6.1 6.6 stable"
+          # Three rather than five, and a four minute deadline per guest rather
+          # than ten. The first run of this job spent its whole twenty-five
+          # minutes on two kernels that never finished and was then killed
+          # holding the logs that would have said why. A CI job has to fail
+          # inside its own budget or it cannot report anything.
+          KERNELS: "5.4 6.1 stable"
+          DEADLINE: "240"
         run: bash scripts/kernel-matrix.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: What the guests said
+        # Printed into the summary rather than only uploaded, because the
+        # question after a row says "no result" is what the guest managed
+        # before it stopped, and that should not need a download.
+        if: always()
+        run: |
+          for log in build/matrix/*.log; do
+            [ -e "$log" ] || continue
+            echo "<details><summary>$(basename "$log")</summary>"
+            echo
+            echo '```'
+            tail -c 4000 "$log"
+            echo '```'
+            echo '</details>'
+          done >> "$GITHUB_STEP_SUMMARY"
+
       - name: Keep the logs
-        # Uploaded on failure only, and they are the whole diagnosis: each
-        # guest's log carries the kernel it booted, the tracepoint layout it
-        # reported, and the preflight table.
-        if: failure()
+        # `always()`, not `failure()`. A job killed by its own timeout is
+        # *cancelled*, and failure() is false for a cancellation -- so the
+        # first run of this job threw away the only evidence it produced.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kernel-matrix-logs
