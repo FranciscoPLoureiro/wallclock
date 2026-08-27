@@ -155,6 +155,24 @@ smoke: bpf build ## Run every test that needs a real kernel (needs root)
 	$(SUDO) $(BIN) load $(firstword $(BPF_OBJ))
 	$(SUDO) $(BIN) load $(firstword $(BPF_OBJ))
 
+.PHONY: matrix
+matrix: ## Load and test on a range of kernels under QEMU (no root needed)
+	# No sudo. /dev/kvm is world-readable on an ordinary desktop and the root
+	# these tests need is root inside the guest, which vimto provides. The one
+	# thing this does need is working KVM: without it QEMU falls back to
+	# software emulation and the guests are slow enough to be indistinguishable
+	# from hung, which is how the first attempt at this matrix failed seven CI
+	# rounds running.
+	bash scripts/kernel-matrix.sh
+
+.PHONY: distro-matrix
+distro-matrix: ## Same, against the kernels distributions actually ship
+	# Slower and heavier than `matrix`, and it answers something that one
+	# cannot: the ci-kernels images are built without CONFIG_CFS_BANDWIDTH, so
+	# they can prove the programs load and attach but can never throttle a
+	# cgroup -- the category this tool exists to separate. These images can.
+	bash scripts/distro-matrix.sh
+
 FLAME_WINDOW ?= 20s
 
 .PHONY: validate
