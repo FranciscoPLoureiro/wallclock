@@ -297,6 +297,19 @@ jobs:
           echo "kvm: $(ls -l /dev/kvm)"
           echo "nested: $(grep -c -E '^flags.*(vmx|svm)' /proc/cpuinfo) cpus expose virtualisation"
 
+      - name: Install the BPF toolchain
+        # The guests run compiled test binaries, and two of those load fixture
+        # objects -- programs written to be refused, compiled next to the test
+        # that asserts the refusal. Those objects are generated rather than
+        # committed, so without clang here the suite fails identically on
+        # every kernel for a reason that has nothing to do with any of them,
+        # which is how it failed the first time this job got as far as running.
+        timeout-minutes: 5
+        run: |
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          sudo apt-get $apt_opts update
+          sudo apt-get $apt_opts install -y --no-install-recommends clang llvm libbpf-dev
+
       - name: Install vimto
         # Statically linked because vimto copies itself into the guest as its
         # init, and the guest has no libc to link it against.
@@ -319,7 +332,7 @@ jobs:
           # holding the only evidence it had produced.
           KERNELS: "5.4 5.15 6.1 6.6 stable"
           DEADLINE: "240"
-        run: bash scripts/kernel-matrix.sh | tee -a "$GITHUB_STEP_SUMMARY"
+        run: make matrix | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: What the guests said
         # Printed into the summary rather than only uploaded, because the
