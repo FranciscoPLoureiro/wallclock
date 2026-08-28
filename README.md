@@ -249,8 +249,11 @@ in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
   verifier actually refused, why not bcc or bpftrace, and how phase 6 was run
   twice.
 - **[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)** — what a host needs, how
-  each requirement is checked, the full kernel matrix, and what building it
-  found.
+  each requirement is checked, and the full kernel matrix.
+- **[docs/FINDINGS.md](docs/FINDINGS.md)** — the four defects that running this
+  in new places uncovered, why nothing caught them, why the QEMU matrix never
+  worked before, and how strongly each conclusion is supported — including the
+  three that were stated confidently and then retracted.
 
 ## Licence
 
