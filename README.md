@@ -108,7 +108,7 @@ both. That is CO-RE stated as a measurement rather than as a principle.
 kernels the tool reported thread ids of 6911073 and 7102830 with an empty
 command column — bytes of a `comm` read as an integer — under a decomposition
 that closed to 100% and a report that said no threads were lost. Rocky 9 calls
-itself 5.14 and carries PREEMPT_LAZY, upstream in 6.13, whose backport adds a
+itself 5.14 and carries the PREEMPT_RT patchset's lazy preemption, which adds a
 field to the header every tracepoint record begins with and moves everything
 after it. Both integrity claims this tool makes about its own output were
 perfectly true of the wrong threads. The offsets are now read from the kernel

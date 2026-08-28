@@ -127,12 +127,18 @@ struct sched_wakeup_ctx {
  * initialisers below are their offsets, and the loader overwrites each one
  * with what the kernel's own format file reports before the program loads.
  *
- * They are not a constant apart. Red Hat's 9.x kernel carries PREEMPT_LAZY --
- * upstream in 6.13, backported into a kernel still numbered 5.14 -- which
- * inserts common_preempt_lazy_count into the common header every tracepoint
- * begins with. On sched_switch that moves prev_pid from 24 to 28 and
- * prev_state from 32 to 40, because prev_state is eight bytes and has to be
- * aligned. A single shift would have fixed one and broken the other.
+ * They are not a constant apart. Red Hat's 9.x kernel carries the PREEMPT_RT
+ * patchset's lazy preemption -- CONFIG_HAVE_PREEMPT_LAZY -- which inserts
+ * preempt_lazy_count into the common header every tracepoint record begins
+ * with. On sched_switch that moves prev_pid from 24 to 28 and prev_state from
+ * 32 to 40, because prev_state is eight bytes and has to be aligned. A single
+ * shift would have fixed one and broken the other.
+ *
+ * Mainline's own PREEMPT_LAZY is a different implementation that shares most
+ * of a name and adds no field at all: ci-kernels 7.1.1 has CONFIG_PREEMPT_LAZY
+ * set and its sched_switch header is the ordinary one. The distinction is
+ * worth keeping because the config symbol is the only thing that tells them
+ * apart, and it is not the one this reads anyway -- the format file is.
  *
  * This is the same lesson as the one the fork and exit programs below were
  * rewritten for, and it arrives more quietly. There the offsets moved past

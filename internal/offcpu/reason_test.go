@@ -139,10 +139,12 @@ func TestABlockedSocketReadIsClassifiedAsNetwork(t *testing.T) {
 	// The subject is identified by tid, not by hoping a distinctive symbol
 	// turns up in the stack. The earlier version of this test required a
 	// frame called ping_recvmsg or inet_recvmsg, and both of those are
-	// choices the kernel build makes rather than facts about the wait:
-	// inet_recvmsg is inlined away on 6.13 and later, and which of the two
-	// appears at all depends on whether ping got a raw socket or an ICMP
-	// datagram socket, which depends on whether it was running as root. The
+	// choices the kernel build makes rather than facts about the wait: the
+	// inet_recvmsg frame is on the captured stack on 6.10 and not on 7.1,
+	// with the same ping and the same guest, while the symbol itself is in
+	// kallsyms on both -- and which of the two names appears at all depends
+	// on whether ping got a raw socket or an ICMP datagram socket, which
+	// depends on whether it was running as root. The
 	// test then failed on a kernel where the classification was perfectly
 	// correct -- reported network, 100% of the wait -- because a static
 	// function had been inlined. Matching the tid is both stricter about
