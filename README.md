@@ -133,8 +133,14 @@ cell, the answer is that the observability stack costs between 0.1% and 0.8%
 of throughput and every one of those differences is smaller than 0.7 standard
 deviations of the runs it is a difference between. Runqueue delay is 0.3%,
 throttling is 0.0%, and the API is blocked 96.6% of the time waiting on its
-dependencies. Neither of the two things this tool separates is happening —
-which the closed account is what makes a statement rather than a guess.
+dependencies. Neither of the two things this tool separates is happening, and
+the closed account is what makes that a statement rather than a guess: there is
+nowhere else for the time to be hiding.
+
+It is a negative result with two limits worth knowing before relying on it —
+the workload is not like-for-like with the original observation, and the
+experiment carries no positive control. Both are
+[stated where the experiment is](docs/DECISIONS.md#pointing-it-at-the-question-it-was-built-for).
 
 ## Quick start
 
