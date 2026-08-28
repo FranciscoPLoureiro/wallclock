@@ -204,81 +204,25 @@ appears in the timeout message. Green, with the tool never having run.
 
 ## What the matrix found
 
-Building it was worth more than the rows it produced.
+Building it was worth more than the rows it produced. Four defects, all present
+for most of this project's life and none of them findable by reading the code:
+the tracepoint offsets that made every Red Hat kernel report the wrong threads,
+a kernel without CFS bandwidth refusing to start the tool at all, a test suite
+that only ran in full on Debian, and a test asserting on a symbol name the
+kernel never promised.
 
-### Red Hat kernels were being reported wrongly, and silently
+They are written up in **[FINDINGS.md](FINDINGS.md)**, with how each was found,
+why nothing caught it, and how strongly each conclusion is supported —
+including the three that were stated confidently during the work and then
+retracted.
 
-On Rocky 9 the tool attached to every tracepoint without complaint and then
-reported thread ids of 6911073 and 7102830, with an empty command column, a
-decomposition closing to 100%, and `no threads lost`.
-
-Red Hat's 9.x kernel calls itself 5.14 and carries the PREEMPT_RT patchset's
-lazy preemption, configured as `CONFIG_HAVE_PREEMPT_LAZY`. It adds
-`preempt_lazy_count` to the common header every tracepoint record begins with,
-and everything after it moves -- by four bytes for the four-byte fields, and by
-eight for `sched_switch`'s `prev_state`, which is eight bytes and has to be
-aligned:
-
-```
-                Arch 7.1.9    Rocky 9 (5.14.0-687)
-prev_comm            8             12
-prev_pid            24             28
-prev_state          32             40
-next_pid            56             64
-```
-
-The programs read those fields at offsets fixed when they were compiled, so
-`prev_pid` came from the last four bytes of `prev_comm`.
-
-This project had already met that hazard once, on `sched_process_fork`, and
-the comment recording it in `bpf/offcpu.bpf.c` states the rule correctly:
-tracepoint field *names* are stable ABI and their offsets are not. That case
-announced itself, because the offsets moved *past the end* of the record and
-the kernel refuses to attach a program that reads beyond a tracepoint's size.
-This one did not: the record grew, every read stayed inside it, and the
-program ran.
-
-**A read that goes out of bounds is caught by the kernel. A read that lands on
-the wrong field of the right record is caught by nothing** -- and the two
-integrity claims this tool makes about its own output, that the decomposition
-closes and that no threads were lost, were both perfectly true of the wrong
-threads.
-
-`internal/tracefs` now reads the layout from the kernel that is about to load
-the program and writes the real offsets into the programs before they load. A
-field that is missing, or that kept its name and changed width, is an error
-naming the field and both offsets rather than a default to fall back on --
-because falling back is precisely the behaviour that produced the wrong
-numbers. The matrix records each kernel's layout in its log, so a future
-divergence is visible rather than inferred.
-
-### The test suite only ran fully on Debian
-
-Three places copied `/bin/dash` to make a CPU-burning subject: the throttling
-test, `wallclock validate`, and `scripts/compare-tools.sh`. Debian and Ubuntu
-ship that file and Arch, Fedora and Red Hat do not. On any other distribution
-the throttling test -- the claim this project exists to make -- **skipped**,
-and the suite reported green. `internal/spin` resolves a shell from a
-candidate list ending at `/bin/sh`, which POSIX requires, and a host without
-one is now a failure rather than a skip.
-
-### A test was asserting on a symbol rather than on behaviour
-
-`TestABlockedSocketReadIsClassifiedAsNetwork` required a stack frame named
-`ping_recvmsg` or `inet_recvmsg`. Neither appeared on 7.1, and the test failed
-on a kernel where the classification was entirely correct -- reported network,
-100% of the wait.
-
-The captured stack goes `sock_recvmsg;inet_recvmsg;raw_recvmsg;...` on 6.10 and
-`sock_recvmsg;raw_recvmsg;...` on 7.1.1, with the same `ping` binary and the
-same guest. `inet_recvmsg` is still in `/proc/kallsyms` on both, so it was not
-compiled out of existence; the frame simply stopped being on the stack. Whether
-that is inlining at that call site, a changed call path, or the unwinder is not
-established here, and it does not need to be: which of `ping_recvmsg` and
-`inet_recvmsg` appears at all *also* depends on whether `ping` got a raw socket
-or an ICMP datagram socket, which depends on whether it was running as root.
-The test now matches the tid of the `ping` it started, which is both stricter
-about whose wait it is looking at and indifferent to all of that.
+The one that matters for this document is the first, because it changes what a
+host has to provide: the programs no longer trust the offsets they were
+compiled with. They read the layout of every tracepoint they attach to from the
+running kernel, and refuse rather than guess when a field is missing or has
+changed width. Nothing extra is required of the host for that — the format
+files under `/sys/kernel/tracing/events/` are always there — but a kernel that
+moves a field is now a supported case rather than a silent wrong answer.
 
 ## Known gaps
 
