@@ -50,11 +50,11 @@ func TestAMainlineLayoutParses(t *testing.T) {
 
 // The layout that made this package necessary.
 //
-// Red Hat's 9.x kernel calls itself 5.14 and carries PREEMPT_LAZY, which is
-// upstream in 6.13. The backport adds common_preempt_lazy_count to the common
-// header, and everything after it moves -- by four bytes for the four-byte
-// fields and by eight for prev_state, which has to be aligned. That difference
-// is the reason this reads per-field offsets rather than one shift.
+// Red Hat's 9.x kernel calls itself 5.14 and carries the PREEMPT_RT
+// patchset's lazy preemption, which adds preempt_lazy_count to the common
+// header. Everything after it moves -- by four bytes for the four-byte fields
+// and by eight for prev_state, which has to be aligned. That difference is the
+// reason this reads per-field offsets rather than one shift.
 func TestTheRedHatLayoutMovesFieldsByDifferentAmounts(t *testing.T) {
 	mainline := layoutFrom(t, "sched_switch-arch-7.1.format")
 	rhel := layoutFrom(t, "sched_switch-rhel-9.format")

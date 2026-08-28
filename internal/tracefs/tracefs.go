@@ -7,11 +7,16 @@
 // does move, for two reasons that have both been seen here.
 //
 // The first is a field appearing in the middle. Red Hat's 9.x kernel carries
-// PREEMPT_LAZY -- upstream in 6.13 -- backported into a kernel that still
-// calls itself 5.14, and it adds common_preempt_lazy_count to the common
-// header every tracepoint begins with. Everything after it moves, and not by
-// a constant: on sched_switch prev_pid moves 24 -> 28 while prev_state, being
-// eight bytes and needing alignment, moves 32 -> 40.
+// the PREEMPT_RT patchset's lazy preemption -- CONFIG_HAVE_PREEMPT_LAZY -- in
+// a kernel that still calls itself 5.14, and it adds preempt_lazy_count to the
+// common header every tracepoint record begins with. Everything after it
+// moves, and not by a constant: on sched_switch prev_pid moves 24 -> 28 while
+// prev_state, being eight bytes and needing alignment, moves 32 -> 40.
+//
+// Mainline's own PREEMPT_LAZY is a different thing wearing most of the same
+// name and adds no field: ci-kernels 7.1.1 has CONFIG_PREEMPT_LAZY=y and an
+// ordinary header. Which is the argument for reading the format file rather
+// than reasoning from a version or a config symbol at all.
 //
 // The second is a field changing representation. On 6.17 sched_process_fork's
 // parent_comm became a __data_loc dynamic string, four bytes instead of

@@ -212,11 +212,12 @@ On Rocky 9 the tool attached to every tracepoint without complaint and then
 reported thread ids of 6911073 and 7102830, with an empty command column, a
 decomposition closing to 100%, and `no threads lost`.
 
-Red Hat's 9.x kernel calls itself 5.14 and carries PREEMPT_LAZY, which is
-upstream in 6.13. The backport adds `common_preempt_lazy_count` to the common
-header every tracepoint record begins with, and everything after it moves --
-by four bytes for the four-byte fields, and by eight for `sched_switch`'s
-`prev_state`, which is eight bytes and has to be aligned:
+Red Hat's 9.x kernel calls itself 5.14 and carries the PREEMPT_RT patchset's
+lazy preemption, configured as `CONFIG_HAVE_PREEMPT_LAZY`. It adds
+`preempt_lazy_count` to the common header every tracepoint record begins with,
+and everything after it moves -- by four bytes for the four-byte fields, and by
+eight for `sched_switch`'s `prev_state`, which is eight bytes and has to be
+aligned:
 
 ```
                 Arch 7.1.9    Rocky 9 (5.14.0-687)
@@ -264,12 +265,20 @@ one is now a failure rather than a skip.
 ### A test was asserting on a symbol rather than on behaviour
 
 `TestABlockedSocketReadIsClassifiedAsNetwork` required a stack frame named
-`ping_recvmsg` or `inet_recvmsg`. `inet_recvmsg` is inlined away on 7.1, and
-which of the two appears at all depends on whether `ping` got a raw socket or
-an ICMP datagram socket, which depends on whether it was running as root. It
-failed on a kernel where the classification was entirely correct. It now
-matches the tid of the `ping` it started, which is both stricter about whose
-wait it is looking at and indifferent to what the compiler did.
+`ping_recvmsg` or `inet_recvmsg`. Neither appeared on 7.1, and the test failed
+on a kernel where the classification was entirely correct -- reported network,
+100% of the wait.
+
+The captured stack goes `sock_recvmsg;inet_recvmsg;raw_recvmsg;...` on 6.10 and
+`sock_recvmsg;raw_recvmsg;...` on 7.1.1, with the same `ping` binary and the
+same guest. `inet_recvmsg` is still in `/proc/kallsyms` on both, so it was not
+compiled out of existence; the frame simply stopped being on the stack. Whether
+that is inlining at that call site, a changed call path, or the unwinder is not
+established here, and it does not need to be: which of `ping_recvmsg` and
+`inet_recvmsg` appears at all *also* depends on whether `ping` got a raw socket
+or an ICMP datagram socket, which depends on whether it was running as root.
+The test now matches the tid of the `ping` it started, which is both stricter
+about whose wait it is looking at and indifferent to all of that.
 
 ## Known gaps
 
