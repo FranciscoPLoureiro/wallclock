@@ -577,6 +577,33 @@ nowhere else for the time to be hiding. The API is blocked 96.6% of the time,
 waiting on its dependencies, and adding two containers to the machine does not
 change that.
 
+**Two limits on all of this, which are the first things to ask about a negative
+result.**
+
+*The workload is not like-for-like.* These runs raise the campaign stock so
+that every request exercises the purchase path. The original observation was
+almost certainly taken with the campaign sold out, which is the refusal path:
+answered out of Redis in about two milliseconds, against about two hundred for
+a purchase that writes to PostgreSQL and publishes to RabbitMQ. Different
+bottleneck entirely. "The effect does not reproduce" is therefore a claim about
+the purchase path, and the sold-out path has not been measured here.
+
+*There is no positive control.* This is a negative result, and nothing in the
+experiment shows the instrument would have produced a positive one. `wallclock
+validate` establishes that queueing and throttling are detected when injected —
+synthetically, with spinners and netem, on subjects built for it. It does not
+establish that they would be detected *on this service, on this machine, under
+this load*. The correct question from a reader is "your tool saw nothing, how
+do I know it sees", and the honest answer today is that its sensitivity was
+established elsewhere and assumed here.
+
+Both are fixable with the harness that already exists: run the same protocol
+with the api's quota tightened, and again with the machine oversubscribed, and
+show the two columns light up. Then the negative row above means *under
+conditions where this tool demonstrably detects queueing and throttling on this
+service, neither is present when the observability stack runs* — which is a
+different and much stronger sentence than the one it can support now.
+
 **Where the time goes, and one destination that is not there.**
 
 | destination | exchanges | mean | worst p99 |

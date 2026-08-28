@@ -137,13 +137,10 @@ dependencies. Neither of the two things this tool separates is happening, and
 the closed account is what makes that a statement rather than a guess: there is
 nowhere else for the time to be hiding.
 
-Two limits on that, stated because they are the first things worth asking. The
-workload is the purchase path rather than the sold-out refusal path the original
-observation was taken under, so this is not a like-for-like reproduction. And
-there is no positive control in the experiment: `validate` shows the tool
-detects injected queueing and throttling synthetically, but nothing here shows
-it would have detected them *on this service, on this machine*. A negative
-result is worth what its instrument is known to be worth.
+It is a negative result with two limits worth knowing before relying on it —
+the workload is not like-for-like with the original observation, and the
+experiment carries no positive control. Both are
+[stated where the experiment is](docs/DECISIONS.md#pointing-it-at-the-question-it-was-built-for).
 
 ## Quick start
 
